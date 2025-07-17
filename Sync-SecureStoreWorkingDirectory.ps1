@@ -19,7 +19,7 @@
     
     # Create SecureStore folder structure
     $binDir = [System.IO.Path]::Combine($resolvedBasePath, "bin")
-    $secretDir = [System.IO.Path]::Combine($resolvedBasePath, "secret")
+    $secretDir = [System.IO.Path]::Combine($resolvedBasePath, "secrets")
     $certsDir = [System.IO.Path]::Combine($resolvedBasePath, "certs")
     
     foreach ($dir in @($resolvedBasePath, $binDir, $secretDir, $certsDir)) {

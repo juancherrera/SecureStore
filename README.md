@@ -59,7 +59,7 @@ C:\SecureStore\
 │   ├── Database.bin
 │   ├── API.bin
 │   └── MyApp.bin
-├── secret\                 # Encrypted secrets (any filename)
+├── secrets\                 # Encrypted secrets (any filename)
 │   ├── prod.secret
 │   ├── api-key.secret
 │   └── config.secret
