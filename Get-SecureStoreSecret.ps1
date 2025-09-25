@@ -1,5 +1,7 @@
-﻿function Get-SecureStoreSecret {
+function Get-SecureStoreSecret {
     [CmdletBinding(DefaultParameterSetName = 'ByName')]
+    [OutputType([string])]
+    [OutputType([System.Management.Automation.PSCredential])]
     param(
         [Parameter(ParameterSetName = 'ByName', Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -17,75 +19,91 @@
         [ValidateNotNullOrEmpty()]
         [string]$SecretPath,
 
-        [Parameter(ParameterSetName = 'ByName', Mandatory = $false)]
-        [string]$FolderPath = "C:\SecureStore",
+        [Parameter(ParameterSetName = 'ByName')]
+        [ValidateNotNullOrEmpty()]
+        [string]$FolderPath = $script:DefaultSecureStorePath,
 
-        [Parameter(Mandatory = $false)]
-        [switch]$AsCredential
+        [Parameter()]
+        [switch]$AsCredential,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$UserName = 'user'
     )
 
     begin {
-        # Import private helper if not already loaded
-        if (-not (Get-Command "Sync-SecureStoreWorkingDirectory" -ErrorAction SilentlyContinue)) {
-            . "$PSScriptRoot\Sync-SecureStoreWorkingDirectory.ps1"
+        if (-not (Get-Command -Name 'Sync-SecureStoreWorkingDirectory' -ErrorAction SilentlyContinue)) {
+            . "$PSScriptRoot/Sync-SecureStoreWorkingDirectory.ps1"
         }
-        
-        # Sync directories
-        Sync-SecureStoreWorkingDirectory | Out-Null
     }
 
     process {
+        $encryptionKey = $null
+        $plaintextBytes = $null
+        $securePassword = $null
         try {
-            # Determine file paths based on parameter set
-            if ($PSCmdlet.ParameterSetName -eq 'ByPath') {
-                # Direct path mode - resolve relative paths
-                if ([System.IO.Path]::IsPathRooted($KeyPath)) {
-                    $keyFilePath = $KeyPath
-                } else {
-                    $keyFilePath = [System.IO.Path]::Combine((Get-Location).Path, $KeyPath)
+            switch ($PSCmdlet.ParameterSetName) {
+                'ByPath' {
+                    $keyFilePath = if ([System.IO.Path]::IsPathRooted($KeyPath)) { $KeyPath } else { Join-Path -Path (Get-Location).Path -ChildPath $KeyPath }
+                    $secretFilePath = if ([System.IO.Path]::IsPathRooted($SecretPath)) { $SecretPath } else { Join-Path -Path (Get-Location).Path -ChildPath $SecretPath }
                 }
-
-                if ([System.IO.Path]::IsPathRooted($SecretPath)) {
-                    $secretFilePath = $SecretPath
-                } else {
-                    $secretFilePath = [System.IO.Path]::Combine((Get-Location).Path, $SecretPath)
+                default {
+                    $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
+                    $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath ("$KeyName.bin")
+                    $secretFilePath = Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
                 }
-            } else {
-                # Name-based mode - use SecureStore structure
-                $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
-                $keyFilePath = [System.IO.Path]::Combine($paths.BinPath, "$KeyName.bin")
-                $secretFilePath = [System.IO.Path]::Combine($paths.SecretPath, $SecretFileName)
             }
 
-            # Validate files exist
-            if (-not (Test-Path $keyFilePath)) {
-                throw "Key file not found: $keyFilePath"
+            if (-not (Test-Path -LiteralPath $keyFilePath)) {
+                throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
             }
 
-            if (-not (Test-Path $secretFilePath)) {
-                throw "Secret file not found: $secretFilePath"
+            if (-not (Test-Path -LiteralPath $secretFilePath)) {
+                throw [System.IO.FileNotFoundException]::new('The secret file could not be located.', $secretFilePath)
             }
 
-            # Read and decrypt
-            $encryptionKey = [System.IO.File]::ReadAllBytes($keyFilePath)
-            $encryptedPassword = [System.IO.File]::ReadAllText($secretFilePath, [System.Text.Encoding]::UTF8).Trim()
-            $securePassword = ConvertTo-SecureString -String $encryptedPassword -Key $encryptionKey
+            $encryptionKey = Read-SecureStoreByteArray -Path $keyFilePath
+            $encryptedPassword = Read-SecureStoreText -Path $secretFilePath -Encoding ([System.Text.Encoding]::UTF8)
 
-            # Return based on switch
+            $plaintextBytes = Unprotect-SecureStoreSecret -Payload $encryptedPassword -MasterKey $encryptionKey
+
+            $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
+            try {
+                $securePassword = New-Object System.Security.SecureString
+                foreach ($char in $chars) {
+                    $securePassword.AppendChar($char)
+                }
+                $securePassword.MakeReadOnly()
+            }
+            finally {
+                [Array]::Clear($chars, 0, $chars.Length)
+            }
+
             if ($AsCredential.IsPresent) {
-                return New-Object System.Management.Automation.PSCredential("user", $securePassword)
-            } else {
-                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-                try {
-                    return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-                } finally {
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-                }
+                return New-Object System.Management.Automation.PSCredential($UserName, $securePassword.Copy())
             }
 
-        } catch {
-            Write-Error "Failed to retrieve secret: $($_.Exception.Message)"
-            return $null
+            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+            try {
+                return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            }
+            finally {
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            }
+        }
+        catch {
+            throw [System.Exception]::new('Failed to retrieve the requested secret.', $_.Exception)
+        }
+        finally {
+            if ($securePassword) {
+                $securePassword.Dispose()
+            }
+            if ($plaintextBytes) {
+                [Array]::Clear($plaintextBytes, 0, $plaintextBytes.Length)
+            }
+            if ($encryptionKey) {
+                [Array]::Clear($encryptionKey, 0, $encryptionKey.Length)
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
-﻿function New-SecureStoreSecret {
-    [CmdletBinding()]
+function New-SecureStoreSecret {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -10,51 +10,86 @@
         [string]$SecretFileName,
 
         [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Password,
+        [ValidateNotNull()]
+        [SecureStoreSecureStringTransformation()]
+        [System.Security.SecureString]$Password,
 
-        [Parameter(Mandatory = $false)]
-        [string]$FolderPath = "C:\SecureStore"
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$FolderPath = $script:DefaultSecureStorePath
     )
 
     begin {
-        # Import private helper if not already loaded
-        if (-not (Get-Command "Sync-SecureStoreWorkingDirectory" -ErrorAction SilentlyContinue)) {
-            . "$PSScriptRoot\Sync-SecureStoreWorkingDirectory.ps1"
+        if (-not (Get-Command -Name 'Sync-SecureStoreWorkingDirectory' -ErrorAction SilentlyContinue)) {
+            . "$PSScriptRoot/Sync-SecureStoreWorkingDirectory.ps1"
         }
     }
 
     process {
+        $securePassword = $null
+        $plaintextBytes = $null
         try {
-            # Create folder structure and get paths
+            $securePassword = ConvertTo-SecureStoreSecureString -InputObject $Password
             $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
-            
-            # Define file paths
-            $keyFilePath = [System.IO.Path]::Combine($paths.BinPath, "$KeyName.bin")
-            $secretFilePath = [System.IO.Path]::Combine($paths.SecretPath, $SecretFileName)
 
-            # Generate or read encryption key
-            if (-not (Test-Path $keyFilePath)) {
-                Write-Verbose "Generating new 256-bit AES key"
-                $encryptionKey = New-Object byte[] 32
-                $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::Create()
-                $rng.GetBytes($encryptionKey)
-                $rng.Dispose()
-                [System.IO.File]::WriteAllBytes($keyFilePath, $encryptionKey)
+            $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath ("$KeyName.bin")
+            $secretFilePath = Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
+
+            if (-not $PSCmdlet.ShouldProcess($secretFilePath, "Create or update secure secret")) {
+                return
             }
 
-            # Encrypt the password
-            $encryptionKey = [System.IO.File]::ReadAllBytes($keyFilePath)
-            $securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
-            $encryptedPassword = ConvertFrom-SecureString -SecureString $securePassword -Key $encryptionKey
+            $encryptionKey = $null
+            $keyCreated = $false
+            if (-not (Test-Path -LiteralPath $keyFilePath)) {
+                $encryptionKey = New-Object byte[] 32
+                $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+                try {
+                    $rng.GetBytes($encryptionKey)
+                }
+                finally {
+                    $rng.Dispose()
+                }
+                Write-Verbose "Generated new encryption key for '$KeyName'."
+                Write-SecureStoreFile -Path $keyFilePath -Bytes $encryptionKey
+                $keyCreated = $true
+            }
 
-            # Save encrypted password
-            [System.IO.File]::WriteAllText($secretFilePath, $encryptedPassword, [System.Text.Encoding]::UTF8)
+            if (-not $encryptionKey) {
+                $encryptionKey = Read-SecureStoreByteArray -Path $keyFilePath
+            }
 
-            Write-Host "Secret '$SecretFileName' created with key '$KeyName' in $($paths.BasePath)"
+            try {
+                $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
+                $payloadJson = Protect-SecureStoreSecret -Plaintext $plaintextBytes -MasterKey $encryptionKey
+                $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
+                try {
+                    Write-SecureStoreFile -Path $secretFilePath -Bytes $payloadBytes
+                }
+                finally {
+                    [Array]::Clear($payloadBytes, 0, $payloadBytes.Length)
+                }
+            }
+            finally {
+                if ($null -ne $plaintextBytes) {
+                    [Array]::Clear($plaintextBytes, 0, $plaintextBytes.Length)
+                }
+                if ($null -ne $encryptionKey) {
+                    [Array]::Clear($encryptionKey, 0, $encryptionKey.Length)
+                }
+            }
 
-        } catch {
-            Write-Error "Failed to create secret: $($_.Exception.Message)"
+            if ($keyCreated) {
+                Write-Verbose "Encryption key '$KeyName' stored at '$keyFilePath'."
+            }
+        }
+        catch {
+            throw [System.Exception]::new("Failed to create or update secret '$SecretFileName'.", $_.Exception)
+        }
+        finally {
+            if ($securePassword) {
+                $securePassword.Dispose()
+            }
         }
     }
 }
