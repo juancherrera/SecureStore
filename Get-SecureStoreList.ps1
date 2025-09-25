@@ -1,3 +1,40 @@
+<#
+.SYNOPSIS
+Summarises keys, secrets, and certificates stored in SecureStore.
+
+.DESCRIPTION
+Get-SecureStoreList enumerates the SecureStore folder structure, returning a PSCustomObject
+with arrays of key files, secret files, and certificate metadata. Certificates nearing expiry
+trigger warnings to aid proactive renewal.
+
+.PARAMETER FolderPath
+Optional SecureStore base path. Defaults to the module's standard location.
+
+.PARAMETER ExpiryWarningDays
+Number of days before expiry that certificates should be flagged.
+
+.INPUTS
+None.
+
+.OUTPUTS
+PSCustomObject describing inventory and certificate health.
+
+.EXAMPLE
+Get-SecureStoreList
+
+Lists the SecureStore contents using the default path.
+
+.EXAMPLE
+Get-SecureStoreList -FolderPath '/srv/app/secrets' -ExpiryWarningDays 45
+
+Lists assets from a custom location and warns about certificates expiring within 45 days.
+
+.NOTES
+Only metadata is returned; secret values remain encrypted on disk.
+
+.LINK
+New-SecureStoreSecret
+#>
 function Get-SecureStoreList {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -38,6 +75,7 @@ function Get-SecureStoreList {
             try {
                 switch ($file.Extension.ToLowerInvariant()) {
                     '.pem' {
+                        # PEM files contain base64 encoded DER blocks; strip headers before conversion.
                         $content = Read-SecureStoreText -Path $file.FullName -Encoding ([System.Text.Encoding]::ASCII)
                         $base64 = ($content -replace '-----BEGIN CERTIFICATE-----', '' -replace '-----END CERTIFICATE-----', '' -replace '\s', '')
                         if (-not [string]::IsNullOrWhiteSpace($base64)) {
@@ -56,11 +94,13 @@ function Get-SecureStoreList {
                     $entry.NotAfter = $certificate.NotAfter
                     if ($certificate.NotAfter -le (Get-Date).AddDays($ExpiryWarningDays)) {
                         $entry.ExpiresSoon = $true
+                        # Use warnings instead of errors so automation can continue while highlighting risk.
                         Write-Warning "Certificate '$($file.Name)' expires on $($certificate.NotAfter.ToString('u'))."
                     }
                 }
             }
             catch {
+                # Verbose output avoids leaking certificate content while still exposing diagnostics.
                 Write-Verbose "Failed to parse certificate '$($file.FullName)': $($_.Exception.Message)"
             }
             finally {

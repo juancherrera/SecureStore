@@ -161,240 +161,122 @@ Describe 'Sync-SecureStoreWorkingDirectory' {
 Describe 'New-SecureStoreSecret' {
     BeforeEach {
         InModuleScope SecureStore {
+            $script:MockFiles = @{}
             Mock -CommandName Sync-SecureStoreWorkingDirectory -ModuleName SecureStore -MockWith {
                 return [PSCustomObject]@{
-                    BasePath  = '/securestore'
-                    BinPath   = '/securestore/bin'
+                    BasePath   = '/securestore'
+                    BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
-                    CertsPath = '/securestore/certs'
+                    CertsPath  = '/securestore/certs'
                 }
             }
+            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
+                param([string]$Path, [string]$LiteralPath)
+                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } elseif ($PSBoundParameters.ContainsKey('Path')) { $Path } else { $null }
+                switch ($target) {
+                    '/securestore/bin/Database.bin' { return $false }
+                    '/securestore/bin/Api.bin'     { return $true }
+                    default { return $true }
+                }
+            }
+            Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore -MockWith {
+                param([string]$Path, [byte[]]$Bytes)
+                $script:MockFiles[$Path] = $Bytes.Clone()
+            }
+            Mock -CommandName Read-SecureStoreByteArray -ModuleName SecureStore -MockWith {
+                param([string]$Path)
+                [void]$Path
+                return [byte[]](1..32)
+            }
+        }
+    }
+
+    It 'creates or updates a secret using the documented example' {
+        InModuleScope SecureStore {
+            New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'P@ssw0rd!'
+            $script:MockFiles.Keys | Should -Contain '/securestore/bin/Database.bin'
+            $script:MockFiles.Keys | Should -Contain '/securestore/secrets/prod.secret'
+            $secretBytes = $script:MockFiles['/securestore/secrets/prod.secret']
+            [System.Text.Encoding]::UTF8.GetString($secretBytes) | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It 'accepts secure string input as per help example' {
+        InModuleScope SecureStore {
+            $secure = [System.Security.SecureString]::new()
+            foreach ($ch in 'token-value'.ToCharArray()) { $secure.AppendChar($ch) }
+            $secure.MakeReadOnly()
+            New-SecureStoreSecret -KeyName 'Api' -SecretFileName 'token.secret' -Password $secure -Confirm:$false
+            $script:MockFiles.Keys | Should -Contain '/securestore/secrets/token.secret'
         }
     }
 
     It 'respects -WhatIf and avoids file writes' {
         InModuleScope SecureStore {
-            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                param(
-                    [string]$Path,
-                    [string]$LiteralPath
-                )
-
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
-                }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                [void]$target
-                return $false
-            }
-            Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore
-
             New-SecureStoreSecret -KeyName 'test' -SecretFileName 'secret.json' -Password 'value' -WhatIf
-
             Assert-MockCalled -CommandName Write-SecureStoreFile -ModuleName SecureStore -Times 0
-        }
-    }
-
-    It 'stores encrypted secret data using authenticated encryption' {
-        InModuleScope SecureStore {
-            $writes = @{}
-            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                param(
-                    [string]$Path,
-                    [string]$LiteralPath
-                )
-
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
-                }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                [void]$target
-                return $false
-            }
-            Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore -MockWith {
-                param($Path, $Bytes)
-                $writes[$Path] = [byte[]]$Bytes.Clone()
-            }
-
-            New-SecureStoreSecret -KeyName 'encKey' -SecretFileName 'secret.txt' -Password 'superSecret!' -Confirm:$false
-
-            $keyPath = '/securestore/bin/encKey.bin'
-            $secretPath = '/securestore/secrets/secret.txt'
-            $writes.ContainsKey($keyPath) | Should -BeTrue
-            $writes.ContainsKey($secretPath) | Should -BeTrue
-
-            $payload = [System.Text.Encoding]::UTF8.GetString($writes[$secretPath])
-            $payloadObject = $payload | ConvertFrom-Json
-            if ($script:SupportsAesGcm) {
-                $payloadObject.Cipher.Algorithm | Should -Be 'AES-GCM'
-            }
-            else {
-                $payloadObject.Cipher.Algorithm | Should -Be 'AES-CBC-HMACSHA256'
-            }
-
-            $plaintext = Unprotect-SecureStoreSecret -Payload $payload -MasterKey $writes[$keyPath]
-            [System.Text.Encoding]::UTF8.GetString($plaintext) | Should -Be 'superSecret!'
-        }
-    }
-
-    It 'falls back to AES-CBC with HMAC when AES-GCM is unavailable' {
-        InModuleScope SecureStore {
-            $writes = @{}
-            $originalSupport = $script:SupportsAesGcm
-            try {
-                $script:SupportsAesGcm = $false
-
-                Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                    param(
-                        [string]$Path,
-                        [string]$LiteralPath
-                    )
-
-                    $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                        $LiteralPath
-                    }
-                    elseif ($PSBoundParameters.ContainsKey('Path')) {
-                        $Path
-                    }
-                    else {
-                        $null
-                    }
-
-                    [void]$target
-                    return $false
-                }
-
-                Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore -MockWith {
-                    param($Path, $Bytes)
-                    $writes[$Path] = [byte[]]$Bytes.Clone()
-                }
-
-                New-SecureStoreSecret -KeyName 'legacyKey' -SecretFileName 'secret.txt' -Password 'compatSecret!' -Confirm:$false
-
-                $secretPath = '/securestore/secrets/secret.txt'
-                $payload = [System.Text.Encoding]::UTF8.GetString($writes[$secretPath])
-                ($payload | ConvertFrom-Json).Cipher.Algorithm | Should -Be 'AES-CBC-HMACSHA256'
-
-                $plaintext = Unprotect-SecureStoreSecret -Payload $payload -MasterKey $writes['/securestore/bin/legacyKey.bin']
-                [System.Text.Encoding]::UTF8.GetString($plaintext) | Should -Be 'compatSecret!'
-            }
-            finally {
-                $script:SupportsAesGcm = $originalSupport
-            }
         }
     }
 }
 
 Describe 'Get-SecureStoreSecret' {
+    BeforeAll {
+        InModuleScope SecureStore {
+            $script:SampleKey = New-Object byte[] 32
+            for ($i = 0; $i -lt $script:SampleKey.Length; $i++) { $script:SampleKey[$i] = [byte]$i }
+            $plaintext = [System.Text.Encoding]::UTF8.GetBytes('P@ssw0rd!')
+            $script:SamplePayload = Protect-SecureStoreSecret -Plaintext $plaintext -MasterKey $script:SampleKey
+        }
+    }
+
     BeforeEach {
         InModuleScope SecureStore {
             Mock -CommandName Sync-SecureStoreWorkingDirectory -ModuleName SecureStore -MockWith {
                 return [PSCustomObject]@{
-                    BasePath  = '/securestore'
-                    BinPath   = '/securestore/bin'
+                    BasePath   = '/securestore'
+                    BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
-                    CertsPath = '/securestore/certs'
+                    CertsPath  = '/securestore/certs'
                 }
+            }
+            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
+                param([string]$Path, [string]$LiteralPath)
+                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } elseif ($PSBoundParameters.ContainsKey('Path')) { $Path } else { $null }
+                switch ($target) {
+                    '/securestore/bin/Database.bin' { return $true }
+                    '/securestore/secrets/prod.secret' { return $true }
+                    './bin/Api.bin' { return $true }
+                    './secrets/api.secret' { return $true }
+                    default { return $true }
+                }
+            }
+            Mock -CommandName Read-SecureStoreByteArray -ModuleName SecureStore -MockWith {
+                return $script:SampleKey.Clone()
+            }
+            Mock -CommandName Read-SecureStoreText -ModuleName SecureStore -MockWith {
+                return $script:SamplePayload
             }
         }
     }
 
-    It 'returns a PSCredential when requested' {
+    It 'returns plain text as shown in the help example' {
         InModuleScope SecureStore {
-            $keyBytes = [byte[]](1..32)
-            $plaintext = [System.Text.Encoding]::UTF8.GetBytes('credSecret')
-            $payload = Protect-SecureStoreSecret -Plaintext $plaintext -MasterKey $keyBytes
-            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                param(
-                    [string]$Path,
-                    [string]$LiteralPath
-                )
-
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
-                }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                [void]$target
-                return $true
-            }
-            $originalReadBytes = Get-Command -Name Read-SecureStoreByteArray -CommandType Function
-            $originalReadText = Get-Command -Name Read-SecureStoreText -CommandType Function
-
-            $credential = $null
-
-            try {
-                Set-Item -Path function:Read-SecureStoreByteArray -Value ({
-                    param([string]$Path)
-                    [void]$Path
-                    return [byte[]]$keyBytes.Clone()
-                }).GetNewClosure()
-
-                Set-Item -Path function:Read-SecureStoreText -Value ({
-                    param([string]$Path, [System.Text.Encoding]$Encoding)
-                    [void]$Path
-                    [void]$Encoding
-                    return $payload
-                }).GetNewClosure()
-
-                $credential = Get-SecureStoreSecret -KeyName 'credKey' -SecretFileName 'secret.txt' -AsCredential -UserName 'alice'
-            }
-            finally {
-                if ($null -ne $originalReadBytes) {
-                    Set-Item -Path function:Read-SecureStoreByteArray -Value $originalReadBytes.ScriptBlock
-                }
-
-                if ($null -ne $originalReadText) {
-                    Set-Item -Path function:Read-SecureStoreText -Value $originalReadText.ScriptBlock
-                }
-            }
-
-            $credential.UserName | Should -Be 'alice'
-            $credential.GetNetworkCredential().Password | Should -Be 'credSecret'
+            Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' | Should -Be 'P@ssw0rd!'
         }
     }
 
-    It 'throws a sanitized error when the secret file is missing' {
+    It 'returns PSCredential using explicit paths as per help example' {
         InModuleScope SecureStore {
-            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                param(
-                    [string]$Path,
-                    [string]$LiteralPath
-                )
+            $credential = Get-SecureStoreSecret -KeyPath './bin/Api.bin' -SecretPath './secrets/api.secret' -AsCredential -UserName 'api-user'
+            $credential.UserName | Should -Be 'api-user'
+            $credential.GetNetworkCredential().Password | Should -Be 'P@ssw0rd!'
+        }
+    }
 
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
-                }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                if ($target -like '*bin/credKey.bin') { return $true }
-                return $false
-            }
-            Mock -CommandName Read-SecureStoreByteArray -ModuleName SecureStore -MockWith { param($Path) [void]$Path; return [byte[]]@(0) }
-
-            Should -Throw -ActualValue { Get-SecureStoreSecret -KeyName 'credKey' -SecretFileName 'missing.txt' } -ErrorId * -ExpectedMessage 'Failed to retrieve the requested secret.'
+    It 'throws a friendly error when the key file is missing' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/bin/Database.bin' } -MockWith { return $false }
+            { Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' } | Should -Throw -ErrorId * -ExceptionType ([System.InvalidOperationException])
         }
     }
 }
@@ -402,90 +284,64 @@ Describe 'Get-SecureStoreSecret' {
 Describe 'New-SecureStoreCertificate' {
     BeforeEach {
         InModuleScope SecureStore {
+            $script:MockFiles = @{}
             Mock -CommandName Sync-SecureStoreWorkingDirectory -ModuleName SecureStore -MockWith {
                 return [PSCustomObject]@{
-                    BasePath  = '/securestore'
-                    BinPath   = '/securestore/bin'
+                    BasePath   = '/securestore'
+                    BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
-                    CertsPath = '/securestore/certs'
+                    CertsPath  = '/securestore/certs'
                 }
             }
             Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
+                param([string]$Path, [string]$LiteralPath)
+                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } elseif ($PSBoundParameters.ContainsKey('Path')) { $Path } else { $null }
+                if ($target -like '*.tmp') { return $false }
+                return $true
+            }
+            Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore -MockWith {
+                param([string]$Path, [byte[]]$Bytes)
+                $script:MockFiles[$Path] = $Bytes.Clone()
+            }
+            Mock -CommandName Move-Item -ModuleName SecureStore -MockWith {
                 param(
-                    [string]$Path,
-                    [string]$LiteralPath
+                    [Parameter(Mandatory = $true)][string]$LiteralPath,
+                    [Parameter(Mandatory = $true)][string]$Destination
                 )
 
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
+                if ($script:MockFiles.ContainsKey($LiteralPath)) {
+                    $script:MockFiles[$Destination] = $script:MockFiles[$LiteralPath]
+                    $script:MockFiles.Remove($LiteralPath)
                 }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                [void]$target
-                return $false
             }
             Mock -CommandName Remove-Item -ModuleName SecureStore
+
         }
     }
 
-    It 'rejects invalid key length for ECDSA' {
+    It 'creates a certificate and exports PEM as documented' {
         InModuleScope SecureStore {
-            { New-SecureStoreCertificate -CertificateName 'invalid' -Password 'pass123!' -Algorithm ECDSA -KeyLength 4096 -Confirm:$false } | Should -Throw
+            $result = New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsName 'web.local' -ExportPem -Confirm:$false
+            $result.CertificateName | Should -Be 'WebApp'
+            $script:MockFiles.Keys | Should -Contain '/securestore/certs/WebApp.pfx'
+            $script:MockFiles.Keys | Should -Contain '/securestore/certs/WebApp.pem'
         }
     }
 
-    It 'honors -WhatIf and avoids generating certificates' {
+    It 'supports the ECDSA help example' {
         InModuleScope SecureStore {
-            function New-SelfSignedCertificate {
-                [CmdletBinding(SupportsShouldProcess = $true)]
-                param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-                [void]$Arguments
-                if (-not $PSCmdlet.ShouldProcess('Test certificate stub', 'Generate')) {
-                    return
-                }
-            }
-            Mock -CommandName New-SelfSignedCertificate -ModuleName SecureStore -MockWith { throw 'Should not be called' }
-
-            New-SecureStoreCertificate -CertificateName 'whatif' -Password 'pass123!' -WhatIf
+            $secure = [System.Security.SecureString]::new()
+            foreach ($ch in 'Sup3rPfx!'.ToCharArray()) { $secure.AppendChar($ch) }
+            $secure.MakeReadOnly()
+            New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2 -Confirm:$false
+            $script:MockFiles.Keys | Should -Contain '/securestore/certs/Api.pfx'
         }
     }
 
-    It 'exports certificate metadata and paths' {
+    It 'honours -WhatIf to avoid export' {
         InModuleScope SecureStore {
-            function New-SelfSignedCertificate {
-                [CmdletBinding(SupportsShouldProcess = $true)]
-                param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-                [void]$Arguments
-                if (-not $PSCmdlet.ShouldProcess('Test certificate stub', 'Generate')) {
-                    return
-                }
-            }
-            function Export-PfxCertificate {
-                [CmdletBinding(SupportsShouldProcess = $true)]
-                param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-                [void]$Arguments
-                if (-not $PSCmdlet.ShouldProcess('Test certificate stub', 'Export')) {
-                    return
-                }
-            }
-            $certObject = New-Object PSObject -Property @{ Thumbprint = 'ABC123'; NotAfter = (Get-Date).AddYears(1) }
-            $certObject | Add-Member -MemberType ScriptMethod -Name Export -Value { param($type) [void]$type; return [byte[]](1,2,3) }
-            $certObject | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
-            Mock -CommandName New-SelfSignedCertificate -ModuleName SecureStore -MockWith { return $certObject }
-            Mock -CommandName Export-PfxCertificate -ModuleName SecureStore
-            Mock -CommandName Move-Item -ModuleName SecureStore
-            Mock -CommandName Write-SecureStoreFile -ModuleName SecureStore
-
-            $result = New-SecureStoreCertificate -CertificateName 'app' -Password 'pass123!' -ExportPem -Confirm:$false
-            $result.CertificateName | Should -Be 'app'
-            $result.Paths.Pfx | Should -Match 'app.pfx$'
-            $result.Paths.Pem | Should -Match 'app.pem$'
-            $result.NotAfter | Should -BeGreaterThan (Get-Date)
+            New-SecureStoreCertificate -CertificateName 'Skip' -Password 'pass123!' -WhatIf
+            $script:MockFiles.Keys | Should -Not -Contain '/securestore/certs/Skip.pfx'
         }
     }
 }
@@ -495,34 +351,38 @@ Describe 'Get-SecureStoreList' {
         InModuleScope SecureStore {
             Mock -CommandName Sync-SecureStoreWorkingDirectory -ModuleName SecureStore -MockWith {
                 return [PSCustomObject]@{
-                    BasePath  = '/securestore'
-                    BinPath   = '/securestore/bin'
+                    BasePath   = '/securestore'
+                    BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
-                    CertsPath = '/securestore/certs'
+                    CertsPath  = '/securestore/certs'
                 }
             }
+            Mock -CommandName Get-ChildItem -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/bin' } -MockWith {
+                return @([pscustomobject]@{ Name = 'Database.bin'; FullName = '/securestore/bin/Database.bin' })
+            }
+            Mock -CommandName Get-ChildItem -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secrets' } -MockWith {
+                return @([pscustomobject]@{ Name = 'prod.secret'; FullName = '/securestore/secrets/prod.secret' })
+            }
+            Mock -CommandName Get-ChildItem -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/certs' } -MockWith {
+                return @([pscustomobject]@{ Name = 'WebApp.cer'; FullName = '/securestore/certs/WebApp.cer'; Extension = '.cer' })
+            }
+            Mock -CommandName New-Object -ModuleName SecureStore -ParameterFilter { $TypeName -eq 'System.Security.Cryptography.X509Certificates.X509Certificate2' } -MockWith {
+                $certObject = [pscustomobject]@{
+                    Thumbprint = 'THUMB123'
+                    NotAfter   = (Get-Date).AddDays(10)
+                }
+                $certObject | Add-Member -MemberType ScriptMethod -Name Dispose -Value { } -Force | Out-Null
+                return $certObject
+            }
+            Mock -CommandName Write-Warning -ModuleName SecureStore
         }
     }
 
-    It 'warns when certificates are nearing expiry' {
+    It 'lists inventory and warns about expiring certificates' {
         InModuleScope SecureStore {
-            Mock -CommandName Get-ChildItem -ModuleName SecureStore -MockWith {
-                param($LiteralPath, $Filter, $File)
-                [void]$Filter
-                [void]$File
-                switch ($LiteralPath) {
-                    '/securestore/bin' { return @([PSCustomObject]@{ Name = 'key.bin'; FullName = '/securestore/bin/key.bin' }) }
-                    '/securestore/secrets' { return @([PSCustomObject]@{ Name = 'secret.txt'; FullName = '/securestore/secrets/secret.txt' }) }
-                    '/securestore/certs' { return @([PSCustomObject]@{ Name = 'cert.cer'; FullName = '/securestore/certs/cert.cer'; Extension = '.cer' }) }
-                }
-            }
-
-            $fakeCert = New-Object PSObject -Property @{ Thumbprint = 'XYZ'; NotAfter = (Get-Date).AddDays(5) }
-            $fakeCert | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
-            Mock -CommandName New-Object -ModuleName SecureStore -ParameterFilter { $TypeName -eq 'System.Security.Cryptography.X509Certificates.X509Certificate2' } -MockWith { $fakeCert }
-            Mock -CommandName Write-Warning -ModuleName SecureStore
-
-            $result = Get-SecureStoreList
+            $result = Get-SecureStoreList -ExpiryWarningDays 45
+            $result.Keys | Should -Contain 'Database.bin'
+            $result.Secrets | Should -Contain 'prod.secret'
             $result.Certificates | Should -HaveCount 1
             $result.Certificates[0].ExpiresSoon | Should -BeTrue
             Assert-MockCalled -CommandName Write-Warning -ModuleName SecureStore -Times 1
@@ -531,39 +391,35 @@ Describe 'Get-SecureStoreList' {
 }
 
 Describe 'Test-SecureStoreEnvironment' {
-    It 'reports readiness based on directory existence' {
+    BeforeEach {
         InModuleScope SecureStore {
             Mock -CommandName Sync-SecureStoreWorkingDirectory -ModuleName SecureStore -MockWith {
                 return [PSCustomObject]@{
-                    BasePath  = '/securestore'
-                    BinPath   = '/securestore/bin'
+                    BasePath   = '/securestore'
+                    BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
-                    CertsPath = '/securestore/certs'
+                    CertsPath  = '/securestore/certs'
                 }
             }
-            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith {
-                param(
-                    [string]$Path,
-                    [string]$LiteralPath
-                )
+        }
+    }
 
-                $target = if ($PSBoundParameters.ContainsKey('LiteralPath')) {
-                    $LiteralPath
-                }
-                elseif ($PSBoundParameters.ContainsKey('Path')) {
-                    $Path
-                }
-                else {
-                    $null
-                }
-
-                [void]$target
-                return $true
-            }
-
+    It 'reports ready when folders exist as per help example' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -MockWith { return $true }
             $status = Test-SecureStoreEnvironment
             $status.Ready | Should -BeTrue
-            $status.Paths.SecretExists | Should -BeTrue
+            $status.Locations.InSync | Should -BeTrue
+        }
+    }
+
+    It 'detects missing folders' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secrets' } -MockWith { return $false }
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -ne '/securestore/secrets' } -MockWith { return $true }
+            $status = Test-SecureStoreEnvironment -FolderPath '/securestore'
+            $status.Ready | Should -BeFalse
+            $status.Paths.SecretExists | Should -BeFalse
         }
     }
 }

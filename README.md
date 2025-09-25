@@ -33,21 +33,18 @@ Import-Module SecureStore
 # Inspect the environment at the default path
 Test-SecureStoreEnvironment
 
-# Create your first secret (WhatIf preview)
-New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'MySecurePassword123' -WhatIf
-
-# Persist the secret after preview
-New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'MySecurePassword123'
-
-# Retrieve the secret as plain text
+# Store and retrieve your first secret
+New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'P@ssw0rd!'
 $password = Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret'
 
-# Generate a certificate with confirmation bypass
-New-SecureStoreCertificate -CertificateName 'MyApp' -Password 'CertPassword123' -Confirm:$false
+# Generate a certificate with SAN support
+New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsName 'web.local' -ExportPem
 
 # List all stored assets
 Get-SecureStoreList | Format-List
 ```
+
+> **Cross-platform note:** On Windows, SecureStore defaults to `C:\ProgramData\SecureStore`. On Linux and macOS it uses `$HOME/.securestore`. Override with `-FolderPath` to target alternate roots.
 
 ## Installation
 
@@ -96,48 +93,26 @@ Get-SecureStoreList   -FolderPath '/srv/app/secrets'
 Creates an encrypted secret using authenticated AES-256 encryption and atomic file writes.
 
 ```powershell
-# Store secret with automatic SecureString conversion
-New-SecureStoreSecret -KeyName 'MyApp' -SecretFileName 'database.secret' -Password 'MyPassword123'
-
-# Provide a SecureString explicitly
-$secure = Read-Host 'Enter secret' -AsSecureString
-New-SecureStoreSecret -KeyName 'MyApp' -SecretFileName 'database.secret' -Password $secure -Confirm:$false
-
-# Preview folder changes without writing
-New-SecureStoreSecret -KeyName 'Preview' -SecretFileName 'test.secret' -Password 'demo' -WhatIf
+New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'P@ssw0rd!'
+$secure = Read-Host 'Enter API token' -AsSecureString
+New-SecureStoreSecret -KeyName 'Api' -SecretFileName 'token.secret' -Password $secure -Confirm:$false
 ```
 
 ### `Get-SecureStoreSecret`
 Retrieves and decrypts stored secrets as plain text or credentials.
 
 ```powershell
-# Get plain text
-$password = Get-SecureStoreSecret -KeyName 'MyApp' -SecretFileName 'database.secret'
-
-# Get PSCredential with custom username
-$cred = Get-SecureStoreSecret -KeyName 'MyApp' -SecretFileName 'database.secret' -AsCredential -UserName 'db-user'
-
-# Direct path access (use the secrets folder)
-$password = Get-SecureStoreSecret -KeyPath './bin/MyApp.bin' -SecretPath './secrets/database.secret'
+Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret'
+Get-SecureStoreSecret -KeyPath './bin/Api.bin' -SecretPath './secrets/api.secret' -AsCredential -UserName 'api-user'
 ```
 
 ### `New-SecureStoreCertificate`
 Generates self-signed certificates with RSA 3072 or ECDSA curves, SAN/EKU support, and secure exports.
 
 ```powershell
-# Basic certificate (1-year validity)
-New-SecureStoreCertificate -CertificateName 'MyApp' -Password 'CertPass123'
-
-# Custom subject, SANs, EKUs, and PEM export
-New-SecureStoreCertificate `
-    -CertificateName 'WebServer' `
-    -Password (Read-Host 'PFX password' -AsSecureString) `
-    -ValidityYears 3 `
-    -Subject 'CN=web.internal, O=My Company' `
-    -DnsName 'web.internal','api.internal' `
-    -EnhancedKeyUsage '1.3.6.1.5.5.7.3.1','1.3.6.1.5.5.7.3.2' `
-    -ExportPem `
-    -Confirm:$false
+New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsName 'web.local' -ExportPem
+$secure = Read-Host 'PFX password' -AsSecureString
+New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2
 ```
 
 ### `Get-SecureStoreList`
