@@ -349,6 +349,10 @@ Describe 'New-SecureStoreCertificate' {
             $result.CertificateName | Should -Be 'WebApp'
             $script:MockFiles.Keys | Should -Contain '/securestore/certs/WebApp.pfx'
             $script:MockFiles.Keys | Should -Contain '/securestore/certs/WebApp.pem'
+            (Split-Path -Path $result.Paths.Pem -Parent) | Should -Be (Split-Path -Path $result.Paths.Pfx -Parent)
+            $pemContent = [System.Text.Encoding]::ASCII.GetString($script:MockFiles['/securestore/certs/WebApp.pem'])
+            $pemContent | Should -Match 'BEGIN CERTIFICATE'
+            $pemContent | Should -Match 'BEGIN RSA PRIVATE KEY'
         }
     }
 
@@ -359,6 +363,17 @@ Describe 'New-SecureStoreCertificate' {
             $secure.MakeReadOnly()
             New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2 -Confirm:$false
             $script:MockFiles.Keys | Should -Contain '/securestore/certs/Api.pfx'
+        }
+    }
+
+    It 'exports PEM including EC private key for ECDSA certificates' {
+        InModuleScope SecureStore {
+            $result = New-SecureStoreCertificate -CertificateName 'Ecc' -Password 'Sup3rPfx!' -Algorithm ECDSA -CurveName nistP256 -ExportPem -Confirm:$false
+            $result.Paths.Pem | Should -Be '/securestore/certs/Ecc.pem'
+            (Split-Path -Path $result.Paths.Pem -Parent) | Should -Be (Split-Path -Path $result.Paths.Pfx -Parent)
+            $pemContent = [System.Text.Encoding]::ASCII.GetString($script:MockFiles['/securestore/certs/Ecc.pem'])
+            $pemContent | Should -Match 'BEGIN CERTIFICATE'
+            $pemContent | Should -Match 'BEGIN EC PRIVATE KEY'
         }
     }
 
