@@ -1,50 +1,75 @@
-﻿function Test-SecureStoreEnvironment {
+<#
+.SYNOPSIS
+Validates the SecureStore working directories and process locations.
+
+.DESCRIPTION
+Test-SecureStoreEnvironment checks that the PowerShell and .NET working directories align,
+verifies required SecureStore folders exist, and reports an overall readiness flag for troubleshooting.
+
+.PARAMETER FolderPath
+Optional SecureStore base path. Defaults to the platform-specific location.
+
+.INPUTS
+None.
+
+.OUTPUTS
+PSCustomObject containing location and folder readiness information.
+
+.EXAMPLE
+Test-SecureStoreEnvironment
+
+Displays readiness information for the default SecureStore location.
+
+.EXAMPLE
+Test-SecureStoreEnvironment -FolderPath '/srv/app/secrets'
+
+Checks a custom SecureStore base path often used on Linux deployments.
+
+.NOTES
+Use this command to diagnose mismatched working directories or missing folders.
+
+.LINK
+Get-SecureStoreList
+#>
+function Test-SecureStoreEnvironment {
     [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
-        [Parameter(Mandatory = $false)]
-        [string]$FolderPath = "C:\SecureStore"
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$FolderPath = $script:DefaultSecureStorePath
     )
 
     begin {
-        if (-not (Get-Command "Sync-SecureStoreWorkingDirectory" -ErrorAction SilentlyContinue)) {
-            . "$PSScriptRoot\Sync-SecureStoreWorkingDirectory.ps1"
+        if (-not (Get-Command -Name 'Sync-SecureStoreWorkingDirectory' -ErrorAction SilentlyContinue)) {
+            . "$PSScriptRoot/Sync-SecureStoreWorkingDirectory.ps1"
         }
     }
 
     process {
-        Write-Host "SecureStore Environment Test"
-        Write-Host "Target base path: $FolderPath"
-
-        # Test directory synchronization
-        Write-Host "`nDirectory Synchronization:"
-        $before_ps = (Get-Location).Path
-        $before_net = [System.IO.Directory]::GetCurrentDirectory()
-
-        Write-Host "  PowerShell location: $before_ps"
-        Write-Host "  .NET current directory: $before_net"
-        Write-Host "  Synchronized: $(($before_ps -eq $before_net))"
-
-        # Perform sync and get paths
+        $psLocation = (Get-Location).Path
+        $netLocation = [System.IO.Directory]::GetCurrentDirectory()
         $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
 
-        # Test SecureStore structure
-        Write-Host "`nSecureStore Structure:"
-        Write-Host "  Base path: $($paths.BasePath)"
-        Write-Host "    Exists: $(Test-Path $paths.BasePath)"
+        $status = [PSCustomObject]@{
+            Locations = [PSCustomObject]@{
+                PowerShell = $psLocation
+                DotNet     = $netLocation
+                # Helpful to highlight when PowerShell and .NET disagree, which can break relative paths.
+                InSync     = ($psLocation -eq $netLocation)
+            }
+            Paths = [PSCustomObject]@{
+                BasePath    = $paths.BasePath
+                BaseExists  = Test-Path -LiteralPath $paths.BasePath
+                BinExists   = Test-Path -LiteralPath $paths.BinPath
+                SecretExists = (Test-Path -LiteralPath $paths.SecretPath) -or (($paths | Get-Member -Name 'LegacySecretPath' -ErrorAction SilentlyContinue) -and $paths.LegacySecretPath -and (Test-Path -LiteralPath $paths.LegacySecretPath))
+                CertsExists = Test-Path -LiteralPath $paths.CertsPath
+            }
+        }
 
-        Write-Host "  Bin folder: $($paths.BinPath)"
-        Write-Host "    Exists: $(Test-Path $paths.BinPath)"
+        # Summarise readiness so CI/CD can quickly decide whether to create missing folders.
+        $status | Add-Member -NotePropertyName 'Ready' -NotePropertyValue ($status.Paths.BaseExists -and $status.Paths.BinExists -and $status.Paths.SecretExists -and $status.Paths.CertsExists) -Force
 
-        Write-Host "  Secret folder: $($paths.SecretPath)"
-        Write-Host "    Exists: $(Test-Path $paths.SecretPath)"
-
-        Write-Host "  Certs folder: $($paths.CertsPath)"
-        Write-Host "    Exists: $(Test-Path $paths.CertsPath)"
-
-        # Overall status
-        $allGood = (Test-Path $paths.BasePath) -and (Test-Path $paths.BinPath) -and 
-                   (Test-Path $paths.SecretPath) -and (Test-Path $paths.CertsPath)
-
-        Write-Host "`nOverall Status: $(if ($allGood) { 'READY' } else { 'NEEDS ATTENTION' })"
+        return $status
     }
 }

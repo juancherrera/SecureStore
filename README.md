@@ -1,18 +1,28 @@
-﻿# SecureStore
+# SecureStore
 
 > Enterprise-grade PowerShell module for secure local secret management and certificate generation
 
-SecureStore provides a centralized, secure solution for managing passwords, API keys, and certificates in PowerShell environments. With AES-256 encryption and organized folder structure, it's perfect for DevOps workflows, automation scripts, and enterprise environments.
+SecureStore provides a centralized, secure solution for managing passwords, API keys, and certificates across Windows and cross-platform PowerShell environments. With authenticated AES-256 encryption, safe file handling, and an organized folder structure, it is well suited for DevOps workflows, automation scripts, and enterprise deployments.
 
 ## Key Features
 
-- **AES-256 Encryption** - Industry-standard security for all stored secrets
-- **Centralized Storage** - Organized `C:\SecureStore` structure with `bin\`, `secret\`, and `certs\` folders
-- **Certificate Generation** - Create self-signed certificates with PFX and PEM export
-- **Flexible Access** - Both name-based and direct path access methods
-- **No Cloud Dependencies** - Purely local storage with Windows file system permissions
-- **Enterprise Ready** - Built for team environments and automation workflows
-- **PowerShell 5.1+** - Compatible with Windows PowerShell and PowerShell Core
+- **AES-256 Authenticated Encryption** – AES-GCM when available, otherwise AES-CBC with HMAC-SHA256, all with per-secret PBKDF2-derived keys
+- **Centralized Storage** – Organized `bin`, `secrets`, and `certs` folders at an OS-aware default path
+- **Certificate Automation** – Create self-signed certificates with SAN/EKU support, mandatory PFX protection, and optional PEM export
+- **Flexible Access** – Both name-based and direct path access patterns
+- **Safety First** – Atomic writes, zeroized secrets, ShouldProcess support, and redacted error messages
+- **PowerShell 5.1+** – Compatible with Windows PowerShell and PowerShell 7+
+
+## Default Locations
+
+SecureStore selects a platform-specific default base folder. Override anytime with `-FolderPath`.
+
+| Platform | Default Path |
+|----------|--------------|
+| Windows  | `C:\\SecureStore` |
+| Non-Windows | `Join-Path $HOME '.securestore'` |
+
+> **Migration note:** Existing `secret` folders are still accepted but deprecated; migrate to `secrets` soon. Future major versions will remove `secret` support.
 
 ## Quick Start
 
@@ -20,237 +30,168 @@ SecureStore provides a centralized, secure solution for managing passwords, API 
 # Import the module
 Import-Module SecureStore
 
-# Test your environment
+# Inspect the environment at the default path
 Test-SecureStoreEnvironment
 
-# Create your first secret
-New-SecureStoreSecret -KeyName "Database" -SecretFileName "prod.secret" -Password "MySecurePassword123"
+# Store and retrieve your first secret
+New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'P@ssw0rd!'
+$password = Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret'
 
-# Retrieve the secret
-$password = Get-SecureStoreSecret -KeyName "Database" -SecretFileName "prod.secret"
+# Generate a certificate with SAN support
+New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsName 'web.local' -ExportPem
 
-# Create a certificate
-New-SecureStoreCertificate -CertificateName "MyApp" -Password "CertPassword123"
-
-# List all your assets
-Get-SecureStoreList
+# List all stored assets
+Get-SecureStoreList | Format-List
 ```
+
+> **Cross-platform note:** On Windows, SecureStore defaults to `C:\SecureStore`. On Linux and macOS it uses `$HOME/.securestore`. Override with `-FolderPath` to target alternate roots.
 
 ## Installation
 
-### Method 1: Manual Installation
-1. Download the latest release or clone this repository
-2. Extract/copy all files to: `C:\Program Files\WindowsPowerShell\Modules\SecureStore\`
-3. Import the module: `Import-Module SecureStore`
-4. Verify installation: `Test-SecureStoreEnvironment`
+### Manual Installation
+1. Download the latest release or clone this repository.
+2. Copy the files to your module path, e.g. `C:\Program Files\WindowsPowerShell\Modules\SecureStore\` or `$HOME/.local/share/powershell/Modules/SecureStore`.
+3. Import the module: `Import-Module SecureStore`.
+4. Verify installation: `Test-SecureStoreEnvironment`.
 
-### Method 2: Using the Zip Creator
-1. Run the included `Create-SecureStoreZip.ps1` script
-2. Extract `SecureStore.zip` to your PowerShell modules directory
-3. Import and test as above
+### Zip Creator
+1. Run the included `Create-SecureStoreZip.ps1` script.
+2. Extract `SecureStore.zip` to a module directory.
+3. Import and test as above.
 
 ## Folder Structure
 
-SecureStore creates a standardized folder structure for all your security assets:
+SecureStore maintains a consistent structure for keys, encrypted secrets, and certificates.
 
 ```
-C:\SecureStore\
-├── bin\                    # AES encryption keys (.bin files)
+<SecureStore base>
+├── bin\                    # AES master keys (.bin files)
 │   ├── Database.bin
 │   ├── API.bin
 │   └── MyApp.bin
-├── secrets\                 # Encrypted secrets (any filename)
+├── secrets\                # Encrypted secrets (any filename)
 │   ├── prod.secret
 │   ├── api-key.secret
 │   └── config.secret
-└── certs\                  # Certificates (.pfx and .pem files)
+└── certs\                  # Certificates (.pfx, optional .pem)
     ├── MyApp.pfx
     ├── MyApp.pem
     ├── WebServer.pfx
     └── WebServer.pem
 ```
 
-## Functions Reference
-
-### `New-SecureStoreSecret`
-Creates an encrypted secret with a local encryption key.
+Use `-FolderPath` to target alternate roots:
 
 ```powershell
-# Basic usage (creates in C:\SecureStore)
-New-SecureStoreSecret -KeyName "MyApp" -SecretFileName "database.secret" -Password "MyPassword123"
+New-SecureStoreSecret -KeyName 'API' -SecretFileName 'token.secret' -Password 'PlainText' -FolderPath '/srv/app/secrets'
+Get-SecureStoreList   -FolderPath '/srv/app/secrets'
+```
 
-# Custom location
-New-SecureStoreSecret -KeyName "API" -SecretFileName "token.secret" -Password "api-token-xyz" -FolderPath "D:\MySecrets"
+## Function Reference
+
+### `New-SecureStoreSecret`
+Creates an encrypted secret using authenticated AES-256 encryption and atomic file writes.
+
+```powershell
+New-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' -Password 'P@ssw0rd!'
+$secure = Read-Host 'Enter API token' -AsSecureString
+New-SecureStoreSecret -KeyName 'Api' -SecretFileName 'token.secret' -Password $secure -Confirm:$false
 ```
 
 ### `Get-SecureStoreSecret`
-Retrieves and decrypts a stored secret.
+Retrieves and decrypts stored secrets as plain text or credentials.
 
 ```powershell
-# Get as plain text
-$password = Get-SecureStoreSecret -KeyName "MyApp" -SecretFileName "database.secret"
-
-# Get as PSCredential object
-$cred = Get-SecureStoreSecret -KeyName "MyApp" -SecretFileName "database.secret" -AsCredential
-
-# Direct path access
-$password = Get-SecureStoreSecret -KeyPath ".\bin\MyApp.bin" -SecretPath ".\secret\database.secret"
+Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret'
+Get-SecureStoreSecret -KeyPath './bin/Api.bin' -SecretPath './secrets/api.secret' -AsCredential -UserName 'api-user'
 ```
 
 ### `New-SecureStoreCertificate`
-Creates self-signed certificates with PFX and PEM export.
+Generates self-signed certificates with RSA 3072 or ECDSA curves, SAN/EKU support, and secure exports.
 
 ```powershell
-# Basic certificate (2-year validity)
-New-SecureStoreCertificate -CertificateName "MyApp" -Password "CertPass123"
-
-# Custom validity and subject
-New-SecureStoreCertificate -CertificateName "WebServer" -Password "Pass123" -ValidityYears 5 -Subject "CN=myapp.local, O=My Company"
+New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsName 'web.local' -ExportPem
+$secure = Read-Host 'PFX password' -AsSecureString
+New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2
 ```
 
 ### `Get-SecureStoreList`
-Lists all available secrets and certificates.
+Summarizes stored keys, secrets, and certificates, warning about near-expiry certificates.
 
 ```powershell
-# List default location
 Get-SecureStoreList
-
-# List custom location
-Get-SecureStoreList -FolderPath "D:\MySecrets"
+Get-SecureStoreList -FolderPath '/srv/app/secrets' -ExpiryWarningDays 45
 ```
 
 ### `Test-SecureStoreEnvironment`
-Tests environment and validates folder structure.
+Validates directory synchronization and folder readiness.
 
 ```powershell
-# Test default location
 Test-SecureStoreEnvironment
-
-# Test custom location  
-Test-SecureStoreEnvironment -FolderPath "D:\MySecrets"
+Test-SecureStoreEnvironment -FolderPath '/srv/app/secrets'
 ```
 
-## Usage Examples
+## Usage Scenarios
 
 ### Database Connection
 ```powershell
-# Store database password
-New-SecureStoreSecret -KeyName "ProdDB" -SecretFileName "connection.secret" -Password "MyDbPassword123"
-
-# Use in connection string
-$dbPassword = Get-SecureStoreSecret -KeyName "ProdDB" -SecretFileName "connection.secret"
-$connectionString = "Server=prod-server;Database=myapp;User=admin;Password=$dbPassword;Encrypt=true"
+New-SecureStoreSecret -KeyName 'ProdDB' -SecretFileName 'connection.secret' -Password (Read-Host 'DB Password' -AsSecureString)
+$connectionSecret = Get-SecureStoreSecret -KeyName 'ProdDB' -SecretFileName 'connection.secret'
+$connectionString = "Server=prod;Database=myapp;User=admin;Password=$connectionSecret;Encrypt=true"
 ```
 
 ### API Authentication
 ```powershell
-# Store API key
-New-SecureStoreSecret -KeyName "OpenAI" -SecretFileName "api-key.secret" -Password "sk-1234567890abcdef"
-
-# Use in REST calls
-$apiKey = Get-SecureStoreSecret -KeyName "OpenAI" -SecretFileName "api-key.secret"
-$headers = @{ "Authorization" = "Bearer $apiKey" }
-Invoke-RestMethod -Uri "https://api.openai.com/v1/models" -Headers $headers
+New-SecureStoreSecret -KeyName 'OpenAI' -SecretFileName 'api-key.secret' -Password 'sk-1234567890abcdef'
+$apiKey = Get-SecureStoreSecret -KeyName 'OpenAI' -SecretFileName 'api-key.secret'
+$headers = @{ Authorization = "Bearer $apiKey" }
+Invoke-RestMethod -Uri 'https://api.openai.com/v1/models' -Headers $headers
 ```
 
 ### Remote PowerShell
 ```powershell
-# Store admin credentials
-New-SecureStoreSecret -KeyName "ServerAdmin" -SecretFileName "admin.secret" -Password "AdminPassword123"
-
-# Use for remote sessions
-$adminCred = Get-SecureStoreSecret -KeyName "ServerAdmin" -SecretFileName "admin.secret" -AsCredential
-Invoke-Command -ComputerName "server01" -Credential $adminCred -ScriptBlock {
-    Get-Service | Where-Object Status -eq "Stopped"
+New-SecureStoreSecret -KeyName 'ServerAdmin' -SecretFileName 'admin.secret' -Password (Read-Host 'Admin Password' -AsSecureString)
+$adminCred = Get-SecureStoreSecret -KeyName 'ServerAdmin' -SecretFileName 'admin.secret' -AsCredential -UserName 'admin'
+Invoke-Command -ComputerName 'server01' -Credential $adminCred -ScriptBlock {
+    Get-Service | Where-Object Status -eq 'Stopped'
 }
 ```
 
-### Certificate for HTTPS
+### Certificates for HTTPS
 ```powershell
-# Create certificate for web application
-New-SecureStoreCertificate -CertificateName "WebApp" -Password "CertPass123" -Subject "CN=myapp.local"
-
-# Import to IIS (requires Administrator)
-$certPath = "C:\SecureStore\certs\WebApp.pfx"
-$certPassword = ConvertTo-SecureString "CertPass123" -AsPlainText -Force
-Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\My -Password $certPassword
+New-SecureStoreCertificate -CertificateName 'WebApp' -Password (Read-Host 'PFX password' -AsSecureString) -Subject 'CN=myapp.local'
+$certPath = (Join-Path (Get-SecureStoreList).BasePath 'certs/WebApp.pfx')
+Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\My -Password (Read-Host 'PFX password' -AsSecureString)
 ```
 
 ## Security Features
 
-- **AES-256 Encryption**: Uses PowerShell's built-in `ConvertFrom-SecureString` with 256-bit keys
-- **Cryptographically Secure Keys**: Generated using `RNGCryptoServiceProvider`
-- **Memory Safety**: Proper cleanup of sensitive data using BSTR marshaling
-- **File System Permissions**: Leverages Windows ACLs for access control
-- **No Network Dependencies**: Everything stored locally with no cloud exposure
-- **Certificate Security**: 2048-bit RSA keys with SHA-256 signatures
+- **Authenticated Encryption**: AES-256-GCM (or AES-256-CBC + HMAC-SHA256 on down-level hosts) with per-secret nonces and integrity checks
+- **Key Derivation**: PBKDF2-SHA256 with 200k iterations and random salt for each secret
+- **Secure Secret Handling**: SecureString conversion, BSTR zeroization, and credential-safe output
+- **Safe Storage**: Atomic file writes via temporary files and forced flush before rename
+- **Cross-Platform Defaults**: OS-aware storage locations with optional overrides
+- **ShouldProcess Support**: `-WhatIf`/`-Confirm` available on mutating commands
+- **Certificate Hygiene**: Mandatory PFX passwords, SAN/EKU support, and near-expiry warnings
 
 ## Enterprise Features
 
-- **Team Environments**: Consistent folder structure across team members
-- **Backup-Friendly**: Single folder contains all security assets
-- **Automation Ready**: Perfect for CI/CD pipelines and scheduled tasks
-- **Audit Trail**: File system logs provide access tracking
-- **Scalable**: Supports unlimited keys, secrets, and certificates
-- **Version Control Safe**: Binary keys and encrypted secrets don't expose plaintext
+- **Team Friendly**: Predictable folder structure simplifies onboarding and backups
+- **Automation Ready**: Built for CI/CD pipelines with strict mocks for testing
+- **Audit Friendly**: File-system logging and sanitized error output help investigations
+- **Scalable**: Supports unlimited keys, secrets, and certificates without cloud dependencies
 
 ## Requirements
 
 - **PowerShell**: 5.1 or later (Windows PowerShell or PowerShell Core)
-- **Operating System**: Windows (uses Windows certificate store for cert generation)
-- **Permissions**: Write access to `C:\SecureStore` (or custom folder)
-- **.NET Framework**: 4.5+ (typically already installed)
+- **Certificates**: Windows certificate APIs are required for live certificate generation; tests use mocks
 
-## Best Practices
+## Testing & Quality Gates
 
-1. **Organize by Application**: Use descriptive `KeyName` values like "MyApp", "Database", "API"
-2. **Descriptive Filenames**: Use clear `SecretFileName` like "prod.secret", "api-key.secret"
-3. **Key Reuse**: One key can encrypt multiple secrets - reuse `KeyName` for related secrets
-4. **Backup Strategy**: Regularly backup the entire `C:\SecureStore` folder
-5. **Access Control**: Use Windows file permissions to restrict folder access
-6. **Certificate Passwords**: Use strong passwords for certificate protection
-7. **Regular Rotation**: Periodically create new secrets and retire old ones
+Run the included Pester tests and script analyzer before submitting changes:
 
-## Contributing
+```powershell
+Invoke-ScriptAnalyzer -Path .\SecureStore.psm1
+Invoke-Pester -Path .\tests -Output Detailed
+```
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-### Development Setup
-1. Fork this repository
-2. Clone your fork: `git clone https://github.com/yourusername/SecureStore-PowerShell.git`
-3. Create a feature branch: `git checkout -b feature/amazing-feature`
-4. Make your changes and test thoroughly
-5. Commit your changes: `git commit -m 'Add amazing feature'`
-6. Push to the branch: `git push origin feature/amazing-feature`
-7. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-- **Issues**: Report bugs or request features via [GitHub Issues](https://github.com/yourusername/SecureStore-PowerShell/issues)
-- **Discussions**: Join conversations in [GitHub Discussions](https://github.com/yourusername/SecureStore-PowerShell/discussions)
-- **Documentation**: Full documentation available in the repository
-
-## Roadmap
-
-- [ ] PowerShell Gallery publication
-- [ ] Linux/macOS support (certificate generation)
-- [ ] Import/export utilities for migration
-- [ ] Advanced key derivation options
-- [ ] Integration with Azure Key Vault (optional)
-- [ ] GUI management interface
-
-## Project Stats
-
-![GitHub stars](https://img.shields.io/github/stars/yourusername/SecureStore-PowerShell?style=social)
-![GitHub forks](https://img.shields.io/github/forks/yourusername/SecureStore-PowerShell?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/yourusername/SecureStore-PowerShell?style=social)
-
----
-
-**Star this repository if SecureStore helped you secure your PowerShell environment!**
-
-**Made with care for the PowerShell community**
