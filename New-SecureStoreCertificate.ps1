@@ -82,8 +82,7 @@ function New-SecureStoreCertificate {
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNull()]
-        [SecureStoreSecureStringTransformationAttribute()]
-        [System.Security.SecureString]$Password,
+        [object]$Password,
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]

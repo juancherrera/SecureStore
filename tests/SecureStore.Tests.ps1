@@ -38,10 +38,9 @@ Describe 'SecureStore defaults' {
 }
 
 Describe 'SecureStore secure string helpers' {
-    It 'transforms plain text values using the argument transformation attribute' {
+    It 'converts plain text values into SecureString instances' {
         InModuleScope SecureStore {
-            $attribute = [SecureStoreSecureStringTransformationAttribute]::new()
-            $secure = $attribute.Transform($ExecutionContext, 'topsecret')
+            $secure = ConvertTo-SecureStoreSecureString -InputObject 'topsecret'
             $secure | Should -BeOfType ([System.Security.SecureString])
 
             $bytes = Get-SecureStorePlaintextData -SecureString $secure
@@ -51,8 +50,7 @@ Describe 'SecureStore secure string helpers' {
 
     It 'converts arrays of plain text to secure strings' {
         InModuleScope SecureStore {
-            $attribute = [SecureStoreSecureStringTransformationAttribute]::new()
-            $result = $attribute.Transform($ExecutionContext, @('first', 'second'))
+            $result = ConvertTo-SecureStoreSecureString -InputObject @('first', 'second')
 
             $result | Should -HaveCount 2
             foreach ($entry in $result) {
