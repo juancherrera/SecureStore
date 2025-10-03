@@ -35,56 +35,6 @@ Set-StrictMode -Version Latest
 # SecureStore Module v2.0
 # Centralized local secret management and certificate generation
 
-class SecureStoreSecureStringTransformationAttribute : System.Management.Automation.ArgumentTransformationAttribute {
-    [object] Transform([System.Management.Automation.EngineIntrinsics] $engineIntrinsics, [object] $inputData) {
-        if ($null -eq $inputData) {
-            # Fail fast when nothing is supplied so that empty secrets never reach disk.
-            throw [System.ArgumentNullException]::new('Password')
-        }
-
-        if ($inputData -is [System.Security.SecureString]) {
-            return $inputData
-        }
-
-        if ($inputData -is [string]) {
-            if ([string]::IsNullOrWhiteSpace([string]$inputData)) {
-                # Enforce non-empty strings to prevent generating decryptable but blank payloads.
-                throw [System.ArgumentException]::new('Password cannot be null or empty.')
-            }
-
-            $chars = ([string]$inputData).ToCharArray()
-            try {
-                $secure = New-Object System.Security.SecureString
-                foreach ($char in $chars) {
-                    # Build the SecureString character-by-character so plaintext never lingers in managed strings.
-                    $secure.AppendChar($char)
-                }
-                $secure.MakeReadOnly()
-                return $secure
-            }
-            finally {
-                # Overwrite the temporary buffer to avoid leaving sensitive bytes in process memory.
-                [Array]::Clear($chars, 0, $chars.Length)
-            }
-        }
-
-        if ($inputData -is [System.Collections.IEnumerable] -and -not ($inputData -is [string])) {
-            $transformed = @()
-            foreach ($item in $inputData) {
-                # Recursively transform each entry to ensure nested collections become SecureString objects too.
-                $transformed += $this.Transform($engineIntrinsics, $item)
-            }
-            if ($transformed.Count -eq 1) {
-                return $transformed[0]
-            }
-
-            return $transformed
-        }
-
-        throw [System.ArgumentException]::new('Password must be provided as a SecureString or plain text string.')
-    }
-}
-
 $script:IsWindowsPlatform = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
 function Get-SecureStoreType {
@@ -201,8 +151,21 @@ function ConvertTo-SecureStoreSecureString {
                 [Array]::Clear($chars, 0, $chars.Length)
             }
         }
+        { $_ -is [System.Collections.IEnumerable] -and -not ($_ -is [string]) } {
+            $results = @()
+            foreach ($item in $_) {
+                $results += ConvertTo-SecureStoreSecureString -InputObject $item
+            }
+
+            if ($results.Count -eq 1) {
+                return $results[0]
+            }
+
+            return $results
+        }
         default {
-            throw [System.ArgumentException]::new('Password must be provided as a SecureString or plain text string.')
+            $message = 'Password must be provided as a SecureString or plain text string.'
+            throw [System.ArgumentException]::new($message)
         }
     }
 }
