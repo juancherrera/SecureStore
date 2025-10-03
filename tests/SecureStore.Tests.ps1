@@ -86,7 +86,8 @@ Describe 'Sync-SecureStoreWorkingDirectory' {
             Mock -CommandName Write-Warning
 
             $result = Sync-SecureStoreWorkingDirectory -BasePath '/var/lib/securestore'
-            $result.SecretPath | Should -Match 'secrets?$'
+            $result.SecretPath | Should -Match 'secrets$'
+            $result.LegacySecretPath | Should -Match 'secret$'
             Assert-MockCalled -CommandName Write-Warning -Times 1
         }
     }
@@ -116,6 +117,7 @@ Describe 'Sync-SecureStoreWorkingDirectory' {
 
             $result = Sync-SecureStoreWorkingDirectory -BasePath '/opt/securestore'
             $result.SecretPath | Should -Match 'secrets$'
+            $result.LegacySecretPath | Should -Match 'secret$'
         }
     }
 
@@ -148,6 +150,7 @@ Describe 'Sync-SecureStoreWorkingDirectory' {
             $result = Sync-SecureStoreWorkingDirectory -BasePath $inputPath
             $result.SecretPath | Should -Be (Join-Path -Path $result.BasePath -ChildPath 'secrets')
             $result.BasePath | Should -Be $expectedBase
+            $result.LegacySecretPath | Should -Be (Join-Path -Path $result.BasePath -ChildPath 'secret')
         }
     }
 }
@@ -161,6 +164,7 @@ Describe 'New-SecureStoreSecret' {
                     BasePath   = '/securestore'
                     BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
+                    LegacySecretPath = '/securestore/secret'
                     CertsPath  = '/securestore/certs'
                 }
             }
@@ -205,6 +209,14 @@ Describe 'New-SecureStoreSecret' {
         }
     }
 
+    It 'redirects legacy secret paths into the preferred secrets directory' {
+        InModuleScope SecureStore {
+            New-SecureStoreSecret -KeyName 'Legacy' -SecretFileName '/securestore/secret/legacy.secret' -Password 'value'
+            $script:MockFiles.Keys | Should -Contain '/securestore/secrets/legacy.secret'
+            $script:MockFiles.Keys | Should -Not -Contain '/securestore/secret/legacy.secret'
+        }
+    }
+
     It 'respects -WhatIf and avoids file writes' {
         InModuleScope SecureStore {
             New-SecureStoreSecret -KeyName 'test' -SecretFileName 'secret.json' -Password 'value' -WhatIf
@@ -230,6 +242,7 @@ Describe 'Get-SecureStoreSecret' {
                     BasePath   = '/securestore'
                     BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
+                    LegacySecretPath = '/securestore/secret'
                     CertsPath  = '/securestore/certs'
                 }
             }
@@ -267,6 +280,22 @@ Describe 'Get-SecureStoreSecret' {
         }
     }
 
+    It 'falls back to the legacy secret folder when the preferred path is empty' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secrets/prod.secret' } -MockWith { return $false }
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secret/prod.secret' } -MockWith { return $true }
+            Get-SecureStoreSecret -KeyName 'Database' -SecretFileName 'prod.secret' | Should -Be 'P@ssw0rd!'
+        }
+    }
+
+    It 'supports path-like KeyName and SecretFileName inputs' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secrets/prod.secret' } -MockWith { return $false }
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secret/prod.secret' } -MockWith { return $true }
+            Get-SecureStoreSecret -KeyName '/securestore/bin/Database.bin' -SecretFileName '/securestore/secret/prod.secret' | Should -Be 'P@ssw0rd!'
+        }
+    }
+
     It 'throws a friendly error when the key file is missing' {
         InModuleScope SecureStore {
             Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/bin/Database.bin' } -MockWith { return $false }
@@ -284,6 +313,7 @@ Describe 'New-SecureStoreCertificate' {
                     BasePath   = '/securestore'
                     BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
+                    LegacySecretPath = '/securestore/secret'
                     CertsPath  = '/securestore/certs'
                 }
             }
@@ -348,6 +378,7 @@ Describe 'Get-SecureStoreList' {
                     BasePath   = '/securestore'
                     BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
+                    LegacySecretPath = '/securestore/secret'
                     CertsPath  = '/securestore/certs'
                 }
             }
@@ -382,6 +413,19 @@ Describe 'Get-SecureStoreList' {
             Assert-MockCalled -CommandName Write-Warning -ModuleName SecureStore -Times 1
         }
     }
+
+    It 'includes secrets from the legacy folder without duplication' {
+        InModuleScope SecureStore {
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secret' } -MockWith { return $true }
+            Mock -CommandName Get-ChildItem -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secret' } -MockWith {
+                return @([pscustomobject]@{ Name = 'legacy.secret'; FullName = '/securestore/secret/legacy.secret' })
+            }
+
+            $result = Get-SecureStoreList
+            $result.Secrets | Should -Contain 'prod.secret'
+            $result.Secrets | Should -Contain 'legacy.secret'
+        }
+    }
 }
 
 Describe 'Test-SecureStoreEnvironment' {
@@ -392,6 +436,7 @@ Describe 'Test-SecureStoreEnvironment' {
                     BasePath   = '/securestore'
                     BinPath    = '/securestore/bin'
                     SecretPath = '/securestore/secrets'
+                    LegacySecretPath = '/securestore/secret'
                     CertsPath  = '/securestore/certs'
                 }
             }
@@ -410,6 +455,7 @@ Describe 'Test-SecureStoreEnvironment' {
     It 'detects missing folders' {
         InModuleScope SecureStore {
             Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secrets' } -MockWith { return $false }
+            Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -eq '/securestore/secret' } -MockWith { return $false }
             Mock -CommandName Test-Path -ModuleName SecureStore -ParameterFilter { $LiteralPath -ne '/securestore/secrets' } -MockWith { return $true }
             $status = Test-SecureStoreEnvironment -FolderPath '/securestore'
             $status.Ready | Should -BeFalse

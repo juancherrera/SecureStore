@@ -62,7 +62,7 @@ function Test-SecureStoreEnvironment {
                 BasePath    = $paths.BasePath
                 BaseExists  = Test-Path -LiteralPath $paths.BasePath
                 BinExists   = Test-Path -LiteralPath $paths.BinPath
-                SecretExists = Test-Path -LiteralPath $paths.SecretPath
+                SecretExists = (Test-Path -LiteralPath $paths.SecretPath) -or (($paths | Get-Member -Name 'LegacySecretPath' -ErrorAction SilentlyContinue) -and $paths.LegacySecretPath -and (Test-Path -LiteralPath $paths.LegacySecretPath))
                 CertsExists = Test-Path -LiteralPath $paths.CertsPath
             }
         }

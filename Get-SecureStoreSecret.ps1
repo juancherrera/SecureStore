@@ -94,17 +94,71 @@ function Get-SecureStoreSecret {
         $plaintextBytes = $null
         $securePassword = $null
         try {
+            $secretCandidates = New-Object System.Collections.Generic.List[string]
+            $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $addCandidate = {
+                param([string]$Candidate)
+
+                if ([string]::IsNullOrWhiteSpace($Candidate)) {
+                    return
+                }
+
+                $resolvedCandidate = [System.IO.Path]::GetFullPath($Candidate)
+                if ($seenCandidates.Add($resolvedCandidate)) {
+                    [void]$secretCandidates.Add($resolvedCandidate)
+                }
+            }
+
             switch ($PSCmdlet.ParameterSetName) {
                 'ByPath' {
-                    # Allow callers to provide explicit file paths for integration scenarios.
-                    $keyFilePath = if ([System.IO.Path]::IsPathRooted($KeyPath)) { $KeyPath } else { Join-Path -Path (Get-Location).Path -ChildPath $KeyPath }
-                    $secretFilePath = if ([System.IO.Path]::IsPathRooted($SecretPath)) { $SecretPath } else { Join-Path -Path (Get-Location).Path -ChildPath $SecretPath }
+                    $keyFilePath = Resolve-SecureStorePath -Path $KeyPath -BasePath (Get-Location).Path
+                    $explicitSecretPath = Resolve-SecureStorePath -Path $SecretPath -BasePath (Get-Location).Path
+                    & $addCandidate $explicitSecretPath
+
+                    $secretDirectory = Split-Path -Path $explicitSecretPath -Parent
+                    if ($secretDirectory) {
+                        $leaf = Split-Path -Path $secretDirectory -Leaf
+                        if ($leaf -and $leaf.Equals('secret', [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $preferredDirectory = Join-Path -Path (Split-Path -Path $secretDirectory -Parent) -ChildPath 'secrets'
+                            $preferredFromExplicit = Join-Path -Path $preferredDirectory -ChildPath (Split-Path -Path $explicitSecretPath -Leaf)
+                            & $addCandidate $preferredFromExplicit
+                        }
+                    }
                 }
                 default {
-                    # Resolve the default layout (bin/secrets) when referencing secrets by name.
                     $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
-                    $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath ("$KeyName.bin")
-                    $secretFilePath = Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
+
+                    if (Test-SecureStorePathLike -Value $KeyName) {
+                        $keyFilePath = Resolve-SecureStorePath -Path $KeyName -BasePath $paths.BasePath
+                    }
+                    else {
+                        $keyChild = if ($KeyName.EndsWith('.bin', [System.StringComparison]::OrdinalIgnoreCase)) { $KeyName } else { "$KeyName.bin" }
+                        $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath $keyChild
+                    }
+
+                    if (Test-SecureStorePathLike -Value $SecretFileName) {
+                        $explicitSecretPath = Resolve-SecureStorePath -Path $SecretFileName -BasePath $paths.BasePath
+                        $preferredSecretPath = ConvertTo-SecureStorePreferredSecretPath -Path $explicitSecretPath -PreferredSecretDir $paths.SecretPath -LegacySecretDir $paths.LegacySecretPath
+                        & $addCandidate $preferredSecretPath
+                        & $addCandidate $explicitSecretPath
+
+                        if ($paths.LegacySecretPath) {
+                            $relativeSecretPath = Get-SecureStoreRelativePath -BasePath $paths.SecretPath -TargetPath $preferredSecretPath
+                            if ($null -ne $relativeSecretPath) {
+                                $legacyCandidate = if ([string]::IsNullOrWhiteSpace($relativeSecretPath)) { $paths.LegacySecretPath } else { Join-Path -Path $paths.LegacySecretPath -ChildPath $relativeSecretPath }
+                                & $addCandidate $legacyCandidate
+                            }
+                        }
+                    }
+                    else {
+                        $preferredSecretPath = Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
+                        & $addCandidate $preferredSecretPath
+
+                        if ($paths.LegacySecretPath) {
+                            $legacyCandidate = Join-Path -Path $paths.LegacySecretPath -ChildPath $SecretFileName
+                            & $addCandidate $legacyCandidate
+                        }
+                    }
                 }
             }
 
@@ -112,8 +166,17 @@ function Get-SecureStoreSecret {
                 throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
             }
 
-            if (-not (Test-Path -LiteralPath $secretFilePath)) {
-                throw [System.IO.FileNotFoundException]::new('The secret file could not be located.', $secretFilePath)
+            $secretFilePath = $null
+            foreach ($candidate in $secretCandidates) {
+                if (Test-Path -LiteralPath $candidate) {
+                    $secretFilePath = $candidate
+                    break
+                }
+            }
+
+            if (-not $secretFilePath) {
+                $fallbackTarget = if ($secretCandidates.Count -gt 0) { $secretCandidates[0] } else { $SecretFileName }
+                throw [System.IO.FileNotFoundException]::new('The secret file could not be located.', $fallbackTarget)
             }
 
             # Load the key and encrypted payload into memory for decryption.

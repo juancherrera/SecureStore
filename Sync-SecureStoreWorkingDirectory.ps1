@@ -52,14 +52,11 @@ function Sync-SecureStoreWorkingDirectory {
 
     $certsDir = Join-Path -Path $resolvedBasePath -ChildPath 'certs'
 
-    $secretDir = $preferredSecretDir
+    $legacyExists = Test-Path -LiteralPath $legacySecretDir
 
-    if ((Test-Path -LiteralPath $legacySecretDir) -and -not (Test-Path -LiteralPath $preferredSecretDir)) {
-        $secretDir = $legacySecretDir
-        if (-not $script:LegacySecretWarningIssued) {
-            Write-Warning "The 'secret' folder name is deprecated and will be removed in a future major version. Please migrate to 'secrets'."
-            $script:LegacySecretWarningIssued = $true
-        }
+    if ($legacyExists -and -not $script:LegacySecretWarningIssued) {
+        Write-Warning "The 'secret' folder name is deprecated and will be removed in a future major version. Please migrate to 'secrets'."
+        $script:LegacySecretWarningIssued = $true
     }
 
     foreach ($dir in @($resolvedBasePath, $binDir, $preferredSecretDir, $certsDir)) {
@@ -72,7 +69,8 @@ function Sync-SecureStoreWorkingDirectory {
     return @{
         BasePath = $resolvedBasePath
         BinPath = $binDir
-        SecretPath = $secretDir
+        SecretPath = $preferredSecretDir
+        LegacySecretPath = $legacySecretDir
         CertsPath = $certsDir
     }
 }
