@@ -1,19 +1,15 @@
 Import-Module "$PSScriptRoot/../SecureStore.psd1" -Force
 
 Describe 'SecureStore defaults' {
-    It 'uses ProgramData on Windows platforms' {
+    It 'uses C:\\SecureStore on Windows platforms' {
         InModuleScope SecureStore {
             $originalFlag = $script:IsWindowsPlatform
-            $originalProgramData = $env:ProgramData
             try {
                 $script:IsWindowsPlatform = $true
-                $env:ProgramData = 'C:\\ProgramData'
-                $expected = [System.IO.Path]::Combine('C:\\ProgramData', 'SecureStore')
-                Get-SecureStoreDefaultPath | Should -Be $expected
+                Get-SecureStoreDefaultPath | Should -Be 'C:\\SecureStore'
             }
             finally {
                 $script:IsWindowsPlatform = $originalFlag
-                $env:ProgramData = $originalProgramData
             }
         }
     }
