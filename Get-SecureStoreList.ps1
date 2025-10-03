@@ -58,7 +58,16 @@ function Get-SecureStoreList {
         $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
 
         $keyFiles = @(Get-ChildItem -LiteralPath $paths.BinPath -Filter '*.bin' -File -ErrorAction SilentlyContinue)
-        $secretFiles = @(Get-ChildItem -LiteralPath $paths.SecretPath -File -ErrorAction SilentlyContinue)
+        $secretFiles = @()
+        $secretFiles += Get-ChildItem -LiteralPath $paths.SecretPath -File -ErrorAction SilentlyContinue
+
+        if ($paths.LegacySecretPath -and (Test-Path -LiteralPath $paths.LegacySecretPath)) {
+            $secretFiles += Get-ChildItem -LiteralPath $paths.LegacySecretPath -File -ErrorAction SilentlyContinue
+        }
+
+        if ($secretFiles.Count -gt 0) {
+            $secretFiles = @($secretFiles | Group-Object -Property Name | ForEach-Object { $_.Group[0] })
+        }
         $certFiles = @(Get-ChildItem -LiteralPath $paths.CertsPath -File -ErrorAction SilentlyContinue)
 
         $certificateDetails = @()

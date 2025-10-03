@@ -76,8 +76,22 @@ function New-SecureStoreSecret {
             $securePassword = ConvertTo-SecureStoreSecureString -InputObject $Password
             $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
 
-            $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath ("$KeyName.bin")
-            $secretFilePath = Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
+            if (Test-SecureStorePathLike -Value $KeyName) {
+                $keyFilePath = Resolve-SecureStorePath -Path $KeyName -BasePath $paths.BasePath
+            }
+            else {
+                $keyChild = if ($KeyName.EndsWith('.bin', [System.StringComparison]::OrdinalIgnoreCase)) { $KeyName } else { "$KeyName.bin" }
+                $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath $keyChild
+            }
+
+            $secretInputPath = if (Test-SecureStorePathLike -Value $SecretFileName) {
+                Resolve-SecureStorePath -Path $SecretFileName -BasePath $paths.BasePath
+            }
+            else {
+                Join-Path -Path $paths.SecretPath -ChildPath $SecretFileName
+            }
+
+            $secretFilePath = ConvertTo-SecureStorePreferredSecretPath -Path $secretInputPath -PreferredSecretDir $paths.SecretPath -LegacySecretDir $paths.LegacySecretPath
 
             if (-not $PSCmdlet.ShouldProcess($secretFilePath, "Create or update secure secret")) {
                 return

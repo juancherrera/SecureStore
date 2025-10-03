@@ -90,6 +90,121 @@ if (-not $script:AesGcmType) {
 
 $script:SupportsAesGcm = $null -ne $script:AesGcmType
 
+function Test-SecureStorePathLike {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    if ([System.IO.Path]::IsPathRooted($Value)) {
+        return $true
+    }
+
+    return ($Value.IndexOf([System.IO.Path]::DirectorySeparatorChar) -ge 0) -or ($Value.IndexOf([System.IO.Path]::AltDirectorySeparatorChar) -ge 0)
+}
+
+function Resolve-SecureStorePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$BasePath
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    $effectiveBase = if ([string]::IsNullOrWhiteSpace($BasePath)) { (Get-Location).Path } else { $BasePath }
+    return [System.IO.Path]::GetFullPath((Join-Path -Path $effectiveBase -ChildPath $Path))
+}
+
+function ConvertTo-SecureStorePreferredSecretPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PreferredSecretDir,
+
+        [Parameter()]
+        [string]$LegacySecretDir
+    )
+
+    $resolvedInput = [System.IO.Path]::GetFullPath($Path)
+    $resolvedPreferred = [System.IO.Path]::GetFullPath($PreferredSecretDir)
+
+    if ([string]::IsNullOrWhiteSpace($LegacySecretDir)) {
+        return $resolvedInput
+    }
+
+    $resolvedLegacy = [System.IO.Path]::GetFullPath($LegacySecretDir)
+
+    if ($resolvedInput.Equals($resolvedLegacy, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedPreferred
+    }
+
+    $legacyWithSeparator = if ($resolvedLegacy.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or $resolvedLegacy.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+        $resolvedLegacy
+    }
+    else {
+        $resolvedLegacy + [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    if ($resolvedInput.StartsWith($legacyWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $relative = $resolvedInput.Substring($legacyWithSeparator.Length)
+        return [System.IO.Path]::GetFullPath((Join-Path -Path $resolvedPreferred -ChildPath $relative))
+    }
+
+    return $resolvedInput
+}
+
+function Get-SecureStoreRelativePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$TargetPath
+    )
+
+    $resolvedBase = [System.IO.Path]::GetFullPath($BasePath)
+    $resolvedTarget = [System.IO.Path]::GetFullPath($TargetPath)
+
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $normalizedBase = if ($resolvedBase.EndsWith($separator)) { $resolvedBase } else { $resolvedBase + $separator }
+
+    if ($resolvedTarget.StartsWith($normalizedBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedTarget.Substring($normalizedBase.Length)
+    }
+
+    if ($resolvedTarget.Equals($resolvedBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+
+    return $null
+}
+
 function Test-SecureStoreFixedTimeEqual {
     [CmdletBinding()]
     [OutputType([bool])]
