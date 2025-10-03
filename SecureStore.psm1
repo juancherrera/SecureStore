@@ -62,12 +62,7 @@ function Get-SecureStoreDefaultPath {
     param()
 
     if ($script:IsWindowsPlatform) {
-        $programData = $env:ProgramData
-        if ([string]::IsNullOrWhiteSpace($programData)) {
-            throw "ProgramData environment variable is not set."
-        }
-
-        return [System.IO.Path]::Combine($programData, 'SecureStore')
+        return 'C:\\SecureStore'
     }
 
     $homePath = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } else { $HOME }

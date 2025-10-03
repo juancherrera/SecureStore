@@ -19,7 +19,7 @@ SecureStore selects a platform-specific default base folder. Override anytime wi
 
 | Platform | Default Path |
 |----------|--------------|
-| Windows  | `Join-Path $env:ProgramData 'SecureStore'` |
+| Windows  | `C:\\SecureStore` |
 | Non-Windows | `Join-Path $HOME '.securestore'` |
 
 > **Migration note:** Existing `secret` folders are still accepted but deprecated; migrate to `secrets` soon. Future major versions will remove `secret` support.
@@ -44,7 +44,7 @@ New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsN
 Get-SecureStoreList | Format-List
 ```
 
-> **Cross-platform note:** On Windows, SecureStore defaults to `C:\ProgramData\SecureStore`. On Linux and macOS it uses `$HOME/.securestore`. Override with `-FolderPath` to target alternate roots.
+> **Cross-platform note:** On Windows, SecureStore defaults to `C:\SecureStore`. On Linux and macOS it uses `$HOME/.securestore`. Override with `-FolderPath` to target alternate roots.
 
 ## Installation
 
