@@ -4,6 +4,7 @@ Comprehensive end-to-end test suite for SecureStore module.
 
 .DESCRIPTION
 Tests all SecureStore functions with visual output and validation.
+Compatible with both PowerShell 5.1 and PowerShell 7+.
 #>
 
 [CmdletBinding()]
@@ -16,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 $testsPassed = 0
 $testsFailed = 0
 $testsTotal = 0
+$isPowerShell7 = $PSVersionTable.PSVersion.Major -ge 7
 
 function Write-TestHeader {
   param([string]$Message)
@@ -47,6 +49,7 @@ function Write-TestSummary {
   Write-Host "`n========================================" -ForegroundColor Cyan
   Write-Host " TEST SUMMARY" -ForegroundColor Cyan
   Write-Host "========================================" -ForegroundColor Cyan
+  Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor White
   Write-Host "Total Tests: $testsTotal" -ForegroundColor White
   Write-Host "Passed: $testsPassed" -ForegroundColor Green
   Write-Host "Failed: $testsFailed" -ForegroundColor $(if ($testsFailed -eq 0) { 'Green' } else { 'Red' })
@@ -152,7 +155,7 @@ try {
   # TEST 7: Create Certificate (PFX only)
   Write-TestHeader "TEST 7: Create Certificate (PFX Only)"
   try {
-    New-SecureStoreCertificate -CertificateName "TestApp" -Password "CertPass123" -FolderPath $TestPath -ValidityYears 2
+    New-SecureStoreCertificate -CertificateName "TestApp" -Password "CertPass123" -FolderPath $TestPath -ValidityYears 2 -Confirm:$false
         
     $pfxExists = Test-Path (Join-Path $TestPath "certs\TestApp.pfx")
     $pemExists = Test-Path (Join-Path $TestPath "certs\TestApp.pem")
@@ -164,10 +167,10 @@ try {
     Write-TestResult "Certificate creation (PFX)" $false $_.Exception.Message
   }
 
-  # TEST 8: Create Certificate with PEM Export
-  Write-TestHeader "TEST 8: Create Certificate (PFX + PEM)"
+  # TEST 8: Create Certificate with PEM Export (RSA)
+  Write-TestHeader "TEST 8: Create Certificate (PFX + PEM - RSA)"
   try {
-    New-SecureStoreCertificate -CertificateName "WebServer" -Password "WebPass123" -FolderPath $TestPath -ExportPem
+    New-SecureStoreCertificate -CertificateName "WebServer" -Password "WebPass123" -FolderPath $TestPath -ExportPem -Confirm:$false 3>$null
         
     $pfxExists = Test-Path (Join-Path $TestPath "certs\WebServer.pfx")
     $pemExists = Test-Path (Join-Path $TestPath "certs\WebServer.pem")
@@ -177,25 +180,80 @@ try {
         
     if ($pemExists) {
       $pemContent = Get-Content (Join-Path $TestPath "certs\WebServer.pem") -Raw
-      $hasPemHeader = $pemContent -match "-----BEGIN CERTIFICATE-----"
-      $hasPemFooter = $pemContent -match "-----END CERTIFICATE-----"
+      $hasCertHeader = $pemContent -match "-----BEGIN CERTIFICATE-----"
+      $hasCertFooter = $pemContent -match "-----END CERTIFICATE-----"
+      $hasKeyHeader = $pemContent -match "-----BEGIN RSA PRIVATE KEY-----"
+      $hasKeyFooter = $pemContent -match "-----END RSA PRIVATE KEY-----"
       $hasBase64 = $pemContent -match "[A-Za-z0-9+/=]+"
+      
+      # Verify Base64 is properly line-wrapped
+      $lines = ($pemContent -split "`n" | Where-Object { $_ -match "^[A-Za-z0-9+/=]+$" })
+      $hasLineBreaks = $lines.Count -gt 1
+      $maxLineLength = if ($lines.Count -gt 0) { ($lines | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum } else { 0 }
+      $properlyFormatted = $maxLineLength -le 76
             
-      Write-TestResult "PEM has correct header" $hasPemHeader
-      Write-TestResult "PEM has correct footer" $hasPemFooter
+      Write-TestResult "PEM has certificate header" $hasCertHeader
+      Write-TestResult "PEM has certificate footer" $hasCertFooter
+      
+      if ($isPowerShell7) {
+        Write-TestResult "PEM has RSA private key header (PS7+)" $hasKeyHeader
+        Write-TestResult "PEM has RSA private key footer (PS7+)" $hasKeyFooter
+      }
+      else {
+        Write-Host "[INFO] PowerShell 5.1 exports certificate-only PEM (no private key)" -ForegroundColor Yellow
+        Write-TestResult "PEM certificate-only mode (PS5.1)" (-not $hasKeyHeader)
+      }
+      
       Write-TestResult "PEM contains Base64 data" $hasBase64
+      Write-TestResult "PEM has line breaks in Base64" $hasLineBreaks "Lines: $($lines.Count)"
+      Write-TestResult "PEM lines properly formatted" $properlyFormatted "Max length: $maxLineLength"
     }
   }
   catch {
-    Write-TestResult "Certificate creation (PEM)" $false $_.Exception.Message
+    Write-TestResult "Certificate creation (PEM - RSA)" $false $_.Exception.Message
   }
 
-  # TEST 9: Create Certificate with Custom Parameters
-  Write-TestHeader "TEST 9: Certificate with Custom Parameters"
+  # TEST 9: Create ECDSA Certificate with PEM Export
+  Write-TestHeader "TEST 9: Create Certificate (PFX + PEM - ECDSA)"
+  try {
+    New-SecureStoreCertificate -CertificateName "EcdsaCert" -Password "EcdsaPass123" -FolderPath $TestPath -Algorithm ECDSA -CurveName nistP256 -ExportPem -Confirm:$false 3>$null
+        
+    $pfxExists = Test-Path (Join-Path $TestPath "certs\EcdsaCert.pfx")
+    $pemExists = Test-Path (Join-Path $TestPath "certs\EcdsaCert.pem")
+        
+    Write-TestResult "ECDSA PFX certificate created" $pfxExists "certs\EcdsaCert.pfx"
+    Write-TestResult "ECDSA PEM certificate created" $pemExists "certs\EcdsaCert.pem"
+        
+    if ($pemExists) {
+      $pemContent = Get-Content (Join-Path $TestPath "certs\EcdsaCert.pem") -Raw
+      $hasCertHeader = $pemContent -match "-----BEGIN CERTIFICATE-----"
+      $hasCertFooter = $pemContent -match "-----END CERTIFICATE-----"
+      $hasKeyHeader = $pemContent -match "-----BEGIN EC PRIVATE KEY-----"
+      $hasKeyFooter = $pemContent -match "-----END EC PRIVATE KEY-----"
+            
+      Write-TestResult "PEM has certificate header" $hasCertHeader
+      Write-TestResult "PEM has certificate footer" $hasCertFooter
+      
+      if ($isPowerShell7) {
+        Write-TestResult "PEM has EC private key header (PS7+)" $hasKeyHeader
+        Write-TestResult "PEM has EC private key footer (PS7+)" $hasKeyFooter
+      }
+      else {
+        Write-Host "[INFO] PowerShell 5.1 exports certificate-only PEM (no private key)" -ForegroundColor Yellow
+        Write-TestResult "PEM certificate-only mode (PS5.1)" (-not $hasKeyHeader)
+      }
+    }
+  }
+  catch {
+    Write-TestResult "Certificate creation (PEM - ECDSA)" $false $_.Exception.Message
+  }
+
+  # TEST 10: Create Certificate with Custom Parameters
+  Write-TestHeader "TEST 10: Certificate with Custom Parameters"
   try {
     New-SecureStoreCertificate -CertificateName "CustomCert" -Password "Custom123" -FolderPath $TestPath `
       -Subject "CN=custom.local, O=TestOrg" -ValidityYears 5 -ExportPem `
-      -DnsName "custom.local", "www.custom.local" -Algorithm RSA -KeyLength 4096
+      -DnsName "custom.local", "www.custom.local" -Algorithm RSA -KeyLength 4096 -Confirm:$false 3>$null
         
     $pfxExists = Test-Path (Join-Path $TestPath "certs\CustomCert.pfx")
     $pemExists = Test-Path (Join-Path $TestPath "certs\CustomCert.pem")
@@ -207,8 +265,29 @@ try {
     Write-TestResult "Custom certificate creation" $false $_.Exception.Message
   }
 
-  # TEST 10: Inventory Listing
-  Write-TestHeader "TEST 10: Inventory Listing"
+  # TEST 11: Create Certificate in Store Only
+  Write-TestHeader "TEST 11: Certificate Store Only Mode"
+  try {
+    $result = New-SecureStoreCertificate -CertificateName "StoreOnlyCert" -Password "StorePass123" -StoreOnly -Confirm:$false
+    
+    $certExists = Test-Path "Cert:\CurrentUser\My\$($result.Thumbprint)"
+    $noPfx = -not (Test-Path (Join-Path $TestPath "certs\StoreOnlyCert.pfx"))
+    
+    Write-TestResult "Certificate created in store" $certExists "Thumbprint: $($result.Thumbprint)"
+    Write-TestResult "No PFX file created (as expected)" $noPfx
+    Write-TestResult "StoreLocation property set" ($null -ne $result.StoreLocation)
+    
+    # Cleanup
+    if ($certExists) {
+      Remove-Item "Cert:\CurrentUser\My\$($result.Thumbprint)" -Force
+    }
+  }
+  catch {
+    Write-TestResult "Certificate store only mode" $false $_.Exception.Message
+  }
+
+  # TEST 12: Inventory Listing
+  Write-TestHeader "TEST 12: Inventory Listing"
   try {
     Write-Host "`nCalling Get-SecureStoreList:" -ForegroundColor Yellow
     Get-SecureStoreList -FolderPath $TestPath
@@ -219,14 +298,14 @@ try {
         
     Write-TestResult "Correct key count" ($keyFiles.Count -eq 1) "Expected: 1, Actual: $($keyFiles.Count)"
     Write-TestResult "Correct secret count" ($secretFiles.Count -eq 3) "Expected: 3, Actual: $($secretFiles.Count)"
-    Write-TestResult "Correct certificate count" ($certFiles.Count -eq 6) "Expected: 6, Actual: $($certFiles.Count)"
+    Write-TestResult "Correct certificate count" ($certFiles.Count -eq 8) "Expected: 8, Actual: $($certFiles.Count)"
   }
   catch {
     Write-TestResult "Inventory listing" $false $_.Exception.Message
   }
 
-  # TEST 11: Direct Path Access
-  Write-TestHeader "TEST 11: Direct Path Access"
+  # TEST 13: Direct Path Access
+  Write-TestHeader "TEST 13: Direct Path Access"
   try {
     $keyPath = Join-Path $TestPath "bin\TestApp.bin"
     $secretPath = Join-Path $TestPath "secrets\password.secret"
@@ -238,8 +317,8 @@ try {
     Write-TestResult "Direct path access" $false $_.Exception.Message
   }
 
-  # TEST 12: Error Handling - Missing Key
-  Write-TestHeader "TEST 12: Error Handling"
+  # TEST 14: Error Handling - Missing Key
+  Write-TestHeader "TEST 14: Error Handling"
   try {
     $errorCaught = $false
     try {
@@ -254,7 +333,7 @@ try {
     Write-TestResult "Error handling" $false $_.Exception.Message
   }
 
-  # TEST 13: Error Handling - Missing Secret
+  # TEST 15: Error Handling - Missing Secret
   try {
     $errorCaught = $false
     try {
@@ -269,8 +348,8 @@ try {
     Write-TestResult "Error handling (missing secret)" $false $_.Exception.Message
   }
 
-  # TEST 14: Verify PFX Can Be Imported
-  Write-TestHeader "TEST 14: Verify Certificates Are Valid"
+  # TEST 16: Verify PFX Can Be Imported
+  Write-TestHeader "TEST 16: Verify Certificates Are Valid"
   try {
     $pfxPath = Join-Path $TestPath "certs\WebServer.pfx"
     $certPassword = ConvertTo-SecureString "WebPass123" -AsPlainText -Force
@@ -287,6 +366,38 @@ try {
   }
   catch {
     Write-TestResult "Certificate validation" $false $_.Exception.Message
+  }
+
+  # TEST 17: Verify PEM Format
+  Write-TestHeader "TEST 17: Verify PEM Format"
+  try {
+    $pemPath = Join-Path $TestPath "certs\WebServer.pem"
+    $pemContent = Get-Content $pemPath -Raw
+    
+    # Extract certificate section
+    $certMatch = [regex]::Match($pemContent, "-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $hasCert = $certMatch.Success
+    
+    Write-TestResult "PEM contains certificate" $hasCert
+    
+    if ($hasCert) {
+      # Try to parse the certificate portion
+      $certBase64 = $certMatch.Groups[1].Value -replace '\s', ''
+      $certBytes = [Convert]::FromBase64String($certBase64)
+      $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
+      
+      Write-TestResult "PEM certificate is parseable" ($null -ne $cert) "Subject: $($cert.Subject)"
+      
+      if ($isPowerShell7) {
+        $keyMatch = [regex]::Match($pemContent, "-----BEGIN RSA PRIVATE KEY-----(.+?)-----END RSA PRIVATE KEY-----", [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        Write-TestResult "PEM contains private key (PS7+)" $keyMatch.Success
+      }
+      
+      $cert.Dispose()
+    }
+  }
+  catch {
+    Write-TestResult "PEM validation" $false $_.Exception.Message
   }
 
   # Final Summary

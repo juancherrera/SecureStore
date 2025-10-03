@@ -5,10 +5,10 @@ Creates a password-protected self-signed certificate within SecureStore.
 .DESCRIPTION
 New-SecureStoreCertificate provisions RSA or ECDSA self-signed certificates, exporting a
 PFX protected by the supplied password and optionally a PEM. It supports SAN and EKU entries,
-ensures atomic writes, and removes transient certificates from the Windows store when finished.
+ensures atomic writes, and can store certificates in the Windows certificate store.
 
 .PARAMETER CertificateName
-Logical name used for the output PFX/PEM files.
+Logical name used for the output PFX/PEM files or certificate friendly name.
 
 .PARAMETER Password
 Password protecting the exported PFX. Accepts plain text or SecureString.
@@ -49,6 +49,9 @@ Optional EKU list to embed within the certificate.
 .PARAMETER ExportPem
 Switch to export a PEM copy alongside the PFX.
 
+.PARAMETER StoreOnly
+Switch to keep certificate in the Windows certificate store without exporting files.
+
 .INPUTS
 System.String, System.Security.SecureString for the Password parameter.
 
@@ -61,19 +64,18 @@ New-SecureStoreCertificate -CertificateName 'WebApp' -Password 'Sup3rPfx!' -DnsN
 Creates an RSA certificate stored as WebApp.pfx and WebApp.pem.
 
 .EXAMPLE
-$secure = Read-Host 'PFX password' -AsSecureString
-New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2
+New-SecureStoreCertificate -CertificateName 'Api' -Password 'Pass123' -StoreOnly
 
-Creates an ECDSA certificate valid for two years and keeps only a PFX export.
+Creates a certificate and keeps it in Cert:\CurrentUser\My without exporting files.
 
 .NOTES
-PFX export always requires a password. Temporary files are removed once the move succeeds.
+PFX export requires a password. PEM export with private key requires PowerShell 7+ or OpenSSL.
 
 .LINK
 Get-SecureStoreList
 #>
 function New-SecureStoreCertificate {
-  [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+  [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Export')]
   [OutputType([pscustomobject])]
   param(
     [Parameter(Mandatory = $true)]
@@ -84,7 +86,7 @@ function New-SecureStoreCertificate {
     [ValidateNotNull()]
     [object]$Password,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateNotNullOrEmpty()]
     [string]$FolderPath = $script:DefaultSecureStorePath,
 
@@ -123,8 +125,11 @@ function New-SecureStoreCertificate {
     [Parameter()]
     [string[]]$EnhancedKeyUsage = @('1.3.6.1.5.5.7.3.1'),
 
-    [Parameter()]
-    [switch]$ExportPem
+    [Parameter(ParameterSetName = 'Export')]
+    [switch]$ExportPem,
+
+    [Parameter(ParameterSetName = 'StoreOnly')]
+    [switch]$StoreOnly
   )
 
   begin {
@@ -136,25 +141,35 @@ function New-SecureStoreCertificate {
   process {
     $securePassword = $null
     $certificate = $null
+    $pfxPath = $null
+    $pemPath = $null
+    
     try {
-      # Convert the supplied password to SecureString to avoid persisting plaintext during export.
+      # Convert the supplied password to SecureString
       $securePassword = ConvertTo-SecureStoreSecureString -InputObject $Password
       if ($securePassword.Length -le 0) {
         throw [System.ArgumentException]::new('Certificate password cannot be empty.')
       }
 
-      $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
-      $subjectName = if ($Subject) { $Subject } else { "CN=$CertificateName" }
-      $pfxPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pfx")
-      $pemPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pem")
-
-      if (-not $PSCmdlet.ShouldProcess($pfxPath, "Create certificate '$CertificateName'")) {
-        return
+      if (-not $StoreOnly.IsPresent) {
+        $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
+        $pfxPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pfx")
+        $pemPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pem")
+        
+        if (-not $PSCmdlet.ShouldProcess($pfxPath, "Create certificate '$CertificateName'")) {
+          return
+        }
       }
+      else {
+        if (-not $PSCmdlet.ShouldProcess("Cert:\CurrentUser\My", "Create certificate '$CertificateName'")) {
+          return
+        }
+      }
+
+      $subjectName = if ($Subject) { $Subject } else { "CN=$CertificateName" }
 
       if ($Algorithm -eq 'RSA') {
         if (-not $PSBoundParameters.ContainsKey('KeyLength')) {
-          # Default to 3072-bit RSA which aligns with current security guidance.
           $KeyLength = 3072
         }
         if ($PSBoundParameters.ContainsKey('CurveName')) {
@@ -166,7 +181,6 @@ function New-SecureStoreCertificate {
           throw [System.ArgumentException]::new('KeyLength is only applicable when Algorithm is RSA.')
         }
         if (-not $PSBoundParameters.ContainsKey('CurveName')) {
-          # Default to NIST P-256 which is widely supported.
           $CurveName = 'nistP256'
         }
       }
@@ -191,10 +205,10 @@ function New-SecureStoreCertificate {
         KeyExportPolicy   = 'Exportable'
         KeySpec           = 'Signature'
         HashAlgorithm     = 'SHA256'
+        FriendlyName      = $CertificateName
       }
 
       if ($Algorithm -eq 'RSA' -and $script:IsWindowsPlatform) {
-        # Use the enhanced provider on Windows for stronger key storage support.
         $certificateParams['Provider'] = 'Microsoft Enhanced RSA and AES Cryptographic Provider'
       }
 
@@ -213,139 +227,111 @@ function New-SecureStoreCertificate {
         $certificateParams['TextExtension'] = $textExtensions
       }
 
-      if (Get-Command -Name 'New-SelfSignedCertificate' -ErrorAction SilentlyContinue) {
-        $certificate = New-SelfSignedCertificate @certificateParams
+      $certificate = New-SelfSignedCertificate @certificateParams
+
+      # Export or keep in store
+      if ($StoreOnly.IsPresent) {
+        # Certificate stays in store
+        Write-Verbose "Certificate '$CertificateName' created in Cert:\CurrentUser\My\$($certificate.Thumbprint)"
       }
       else {
-        $notBefore = [System.DateTimeOffset]::Now
-        $notAfter = $notBefore.AddYears($ValidityYears)
-        if ($notAfter -lt $notBefore) {
-          $notAfter = $notBefore.AddYears(1)
-        }
-
-        if ($Algorithm -eq 'RSA') {
-          $key = [System.Security.Cryptography.RSA]::Create($KeyLength)
-          $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($subjectName, $key, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-        }
-        else {
-          $curve = [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName($CurveName)
-          $key = [System.Security.Cryptography.ECDsa]::Create($curve)
-          $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($subjectName, $key, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+        # Export to files
+        $tempPfxPath = "$pfxPath.tmp"
+        if (Test-Path -LiteralPath $tempPfxPath) {
+          Remove-Item -LiteralPath $tempPfxPath -Force
         }
 
         try {
-          $request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $false))
-          $request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $false))
+          # Export PFX
+          Export-PfxCertificate -Cert $certificate -FilePath $tempPfxPath -Password $securePassword | Out-Null
+          Move-Item -LiteralPath $tempPfxPath -Destination $pfxPath -Force
 
-          if ($DnsName -or $IpAddress -or $Email -or $Uri) {
-            $sanBuilder = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-            foreach ($dns in ($DnsName | Where-Object { $_ })) { $sanBuilder.AddDnsName($dns) }
-            foreach ($ip in ($IpAddress | Where-Object { $_ })) { $sanBuilder.AddIpAddress([System.Net.IPAddress]::Parse($ip)) }
-            foreach ($address in ($Email | Where-Object { $_ })) { $sanBuilder.AddEmailAddress($address) }
-            foreach ($link in ($Uri | Where-Object { $_ })) { $sanBuilder.AddUri([System.Uri]$link) }
-            $request.CertificateExtensions.Add($sanBuilder.Build())
-          }
-
-          if ($EnhancedKeyUsage -and $EnhancedKeyUsage.Count -gt 0) {
-            $ekuCollection = [System.Security.Cryptography.OidCollection]::new()
-            foreach ($eku in $EnhancedKeyUsage) {
-              if (-not [string]::IsNullOrWhiteSpace($eku)) {
-                [void]$ekuCollection.Add([System.Security.Cryptography.Oid]::new($eku))
+          # Export PEM if requested
+          if ($ExportPem.IsPresent) {
+            # Convert SecureString to plain text temporarily
+            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+            $plainPassword = $null
+            try {
+              $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+              
+              # Re-import PFX with exportable flag
+              $pfxCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $pfxPath,
+                $plainPassword,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              )
+              
+              try {
+                # Export certificate portion
+                $certBytes = $pfxCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+                $certPem = "-----BEGIN CERTIFICATE-----`n" + [Convert]::ToBase64String($certBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END CERTIFICATE-----"
+                
+                # Try to export private key (PowerShell 7+ only)
+                $keyPem = $null
+                $keyExported = $false
+                
+                if ($PSVersionTable.PSVersion.Major -ge 7) {
+                  # PowerShell 7+ has the export methods
+                  try {
+                    if ($Algorithm -eq 'RSA') {
+                      $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($pfxCert)
+                      if ($key) {
+                        $keyBytes = $key.ExportRSAPrivateKey()
+                        $keyPem = "`n-----BEGIN RSA PRIVATE KEY-----`n" + [Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END RSA PRIVATE KEY-----"
+                        [Array]::Clear($keyBytes, 0, $keyBytes.Length)
+                        $keyExported = $true
+                      }
+                    }
+                    else {
+                      $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($pfxCert)
+                      if ($key) {
+                        $keyBytes = $key.ExportECPrivateKey()
+                        $keyPem = "`n-----BEGIN EC PRIVATE KEY-----`n" + [Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END EC PRIVATE KEY-----"
+                        [Array]::Clear($keyBytes, 0, $keyBytes.Length)
+                        $keyExported = $true
+                      }
+                    }
+                  }
+                  catch {
+                    Write-Warning "Failed to export private key: $($_.Exception.Message)"
+                  }
+                }
+                
+                if (-not $keyExported) {
+                  Write-Warning "PEM export: Certificate only (no private key). Private key export requires PowerShell 7+. Use PFX for full functionality or convert with OpenSSL."
+                }
+                
+                # Write PEM file
+                $pemContent = if ($keyPem) { $certPem + $keyPem } else { $certPem }
+                [System.IO.File]::WriteAllText($pemPath, $pemContent, [System.Text.Encoding]::ASCII)
+                [Array]::Clear($certBytes, 0, $certBytes.Length)
+              }
+              finally {
+                $pfxCert.Dispose()
               }
             }
-            if ($ekuCollection.Count -gt 0) {
-              $request.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($ekuCollection, $false))
-            }
-          }
-
-          $certificate = $request.CreateSelfSigned($notBefore, $notAfter)
-        }
-        finally {
-          if ($key -and ($key -is [System.IDisposable])) {
-            $key.Dispose()
-          }
-        }
-      }
-
-      $tempPfxPath = "$pfxPath.tmp"
-      $useTempFile = $true
-      if (Test-Path -LiteralPath $tempPfxPath) {
-        Remove-Item -LiteralPath $tempPfxPath -Force
-      }
-
-      try {
-        # Export to a temporary file first to guarantee the final move is atomic and password protected.
-        if (Get-Command -Name 'Export-PfxCertificate' -ErrorAction SilentlyContinue) {
-          Export-PfxCertificate -Cert $certificate -FilePath $tempPfxPath -Password $securePassword | Out-Null
-        }
-        else {
-          $useTempFile = $false
-          # Convert the SecureString to a BSTR only for the duration of the export call.
-          $passwordHandle = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-          $pfxBytes = $null
-          try {
-            $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordHandle)
-            try {
-              $pfxBytes = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $plain)
-            }
             finally {
-              if ($plain) {
-                $chars = $plain.ToCharArray()
+              [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+              if ($plainPassword) {
+                $chars = $plainPassword.ToCharArray()
                 [Array]::Clear($chars, 0, $chars.Length)
               }
             }
           }
-          finally {
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordHandle)
-          }
-
-          if ($pfxBytes) {
-            try {
-              Write-SecureStoreFile -Path $pfxPath -Bytes $pfxBytes
-            }
-            finally {
-              [Array]::Clear($pfxBytes, 0, $pfxBytes.Length)
-            }
+        }
+        finally {
+          if (Test-Path -LiteralPath $tempPfxPath) {
+            Remove-Item -LiteralPath $tempPfxPath -Force
           }
         }
 
-        if ($useTempFile) {
-          Move-Item -LiteralPath $tempPfxPath -Destination $pfxPath -Force
+        # Remove from store after export
+        try {
+          Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
         }
-
-        if ($ExportPem.IsPresent) {
-          # Export a PEM when requested while ensuring buffers are cleared afterwards.
-          $certBytes = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-          try {
-            $pemContent = "-----BEGIN CERTIFICATE-----`n" + [Convert]::ToBase64String($certBytes, 'InsertLineBreaks') + "`n-----END CERTIFICATE-----"
-            $pemBytes = [System.Text.Encoding]::ASCII.GetBytes($pemContent)
-            try {
-              Write-SecureStoreFile -Path $pemPath -Bytes $pemBytes
-            }
-            finally {
-              [Array]::Clear($pemBytes, 0, $pemBytes.Length)
-            }
-          }
-          finally {
-            [Array]::Clear($certBytes, 0, $certBytes.Length)
-          }
+        catch {
+          Write-Verbose "Failed to remove certificate '$($certificate.Thumbprint)' from store: $($_.Exception.Message)"
         }
-      }
-      finally {
-        if ($useTempFile -and (Test-Path -LiteralPath $tempPfxPath)) {
-          Remove-Item -LiteralPath $tempPfxPath -Force
-        }
-      }
-
-      $thumbprint = $certificate.Thumbprint
-      $notAfter = $certificate.NotAfter
-
-      try {
-        # Remove the temporary cert from the personal store to avoid cluttering the user profile.
-        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
-      }
-      catch {
-        Write-Verbose "Failed to remove certificate '$thumbprint' from store: $($_.Exception.Message)"
       }
 
       [PSCustomObject]@{
@@ -354,12 +340,16 @@ function New-SecureStoreCertificate {
         Algorithm       = $Algorithm
         KeyLength       = if ($Algorithm -eq 'RSA') { $KeyLength } else { $null }
         CurveName       = if ($Algorithm -eq 'ECDSA') { $CurveName } else { $null }
-        Thumbprint      = $thumbprint
-        NotAfter        = $notAfter
-        Paths           = [PSCustomObject]@{
-          Pfx = $pfxPath
-          Pem = if ($ExportPem) { $pemPath } else { $null }
+        Thumbprint      = $certificate.Thumbprint
+        NotAfter        = $certificate.NotAfter
+        StoreLocation   = if ($StoreOnly) { "Cert:\CurrentUser\My\$($certificate.Thumbprint)" } else { $null }
+        Paths           = if (-not $StoreOnly) {
+          [PSCustomObject]@{
+            Pfx = $pfxPath
+            Pem = if ($ExportPem) { $pemPath } else { $null }
+          }
         }
+        else { $null }
       }
     }
     catch {
@@ -369,7 +359,7 @@ function New-SecureStoreCertificate {
       if ($securePassword) {
         $securePassword.Dispose()
       }
-      if ($certificate -and ($certificate -is [System.IDisposable])) {
+      if ($certificate -and ($certificate -is [System.IDisposable]) -and -not $StoreOnly.IsPresent) {
         $certificate.Dispose()
       }
     }
