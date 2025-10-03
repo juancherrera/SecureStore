@@ -133,6 +133,7 @@ function New-SecureStoreCertificate {
   )
 
   begin {
+    # Ensure helper functions are loaded even when the module is dot‑sourced.
     if (-not (Get-Command -Name 'Sync-SecureStoreWorkingDirectory' -ErrorAction SilentlyContinue)) {
       . "$PSScriptRoot/Sync-SecureStoreWorkingDirectory.ps1"
     }
@@ -143,19 +144,19 @@ function New-SecureStoreCertificate {
     $certificate = $null
     $pfxPath = $null
     $pemPath = $null
-    
+
     try {
-      # Convert the supplied password to SecureString
+      # Convert the supplied password to SecureString and validate it.
       $securePassword = ConvertTo-SecureStoreSecureString -InputObject $Password
       if ($securePassword.Length -le 0) {
         throw [System.ArgumentException]::new('Certificate password cannot be empty.')
       }
 
+      # Establish output paths if we are exporting to disk.
       if (-not $StoreOnly.IsPresent) {
         $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
         $pfxPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pfx")
         $pemPath = Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pem")
-        
         if (-not $PSCmdlet.ShouldProcess($pfxPath, "Create certificate '$CertificateName'")) {
           return
         }
@@ -166,8 +167,10 @@ function New-SecureStoreCertificate {
         }
       }
 
+      # Build the subject. Default to CN=<CertificateName>.
       $subjectName = if ($Subject) { $Subject } else { "CN=$CertificateName" }
 
+      # Validate mutually exclusive parameters based on algorithm.
       if ($Algorithm -eq 'RSA') {
         if (-not $PSBoundParameters.ContainsKey('KeyLength')) {
           $KeyLength = 3072
@@ -185,12 +188,13 @@ function New-SecureStoreCertificate {
         }
       }
 
+      # Build SAN and EKU text extensions.
       $textExtensions = @()
       $sanComponents = @()
-      if ($DnsName) { $sanComponents += ($DnsName | ForEach-Object { "dns=$_" }) }
+      if ($DnsName) { $sanComponents += ($DnsName   | ForEach-Object { "dns=$_" }) }
       if ($IpAddress) { $sanComponents += ($IpAddress | ForEach-Object { "ipaddress=$_" }) }
-      if ($Email) { $sanComponents += ($Email | ForEach-Object { "email=$_" }) }
-      if ($Uri) { $sanComponents += ($Uri | ForEach-Object { "url=$_" }) }
+      if ($Email) { $sanComponents += ($Email     | ForEach-Object { "email=$_" }) }
+      if ($Uri) { $sanComponents += ($Uri       | ForEach-Object { "url=$_" }) }
       if ($sanComponents.Count -gt 0) {
         $textExtensions += "2.5.29.17={text}$($sanComponents -join '&')"
       }
@@ -198,6 +202,7 @@ function New-SecureStoreCertificate {
         $textExtensions += "2.5.29.37={text}$($EnhancedKeyUsage -join ',')"
       }
 
+      # Base certificate parameters.
       $certificateParams = @{
         Subject           = $subjectName
         CertStoreLocation = 'Cert:\CurrentUser\My'
@@ -208,76 +213,98 @@ function New-SecureStoreCertificate {
         FriendlyName      = $CertificateName
       }
 
+      # On Windows, explicitly set the provider for RSA keys.
       if ($Algorithm -eq 'RSA' -and $script:IsWindowsPlatform) {
         $certificateParams['Provider'] = 'Microsoft Enhanced RSA and AES Cryptographic Provider'
       }
 
+      # Algorithm-specific parameters.
       if ($Algorithm -eq 'RSA') {
         $certificateParams['KeyAlgorithm'] = 'RSA'
         $certificateParams['KeyLength'] = $KeyLength
       }
       else {
-        $certificateParams['KeyAlgorithm'] = 'ECDSA'
-        $certificateParams['CurveExportPolicy'] = 'Exact'
-        $certificateParams['CurveName'] = $CurveName
+        # ECDSA parameters depend on the PowerShell version:
+        # - PS7+: use KeyAlgorithm='ECDSA' and separate CurveName.
+        # - PS5.1: embed the curve in the algorithm name (e.g. ECDSA_nistP256).
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+          $certificateParams['KeyAlgorithm'] = 'ECDSA'
+          $certificateParams['CurveName'] = $CurveName
+        }
+        else {
+          $certificateParams['KeyAlgorithm'] = "ECDSA_$CurveName"
+        }
       }
 
+      # Add custom extensions if present.
       if ($textExtensions.Count -gt 0) {
         $certificateParams['Type'] = 'Custom'
         $certificateParams['TextExtension'] = $textExtensions
       }
 
-      $certificate = New-SelfSignedCertificate @certificateParams
+      # Create the certificate.  Retry without custom extensions on PS5 if ECDSA fails.
+      try {
+        $certificate = New-SelfSignedCertificate @certificateParams
+      }
+      catch {
+        if ($Algorithm -eq 'ECDSA' -and ($certificateParams.ContainsKey('Type') -or $certificateParams.ContainsKey('TextExtension'))) {
+          Write-Warning "ECDSA with SAN/EKU extensions not supported on this system. Creating basic ECDSA certificate."
+          $certificateParams.Remove('Type')
+          $certificateParams.Remove('TextExtension')
+          $certificate = New-SelfSignedCertificate @certificateParams
+        }
+        else {
+          throw
+        }
+      }
 
-      # Export or keep in store
+      # Export or keep in store.
       if ($StoreOnly.IsPresent) {
-        # Certificate stays in store
         Write-Verbose "Certificate '$CertificateName' created in Cert:\CurrentUser\My\$($certificate.Thumbprint)"
       }
       else {
-        # Export to files
+        # Export PFX to temporary file and move it atomically.
         $tempPfxPath = "$pfxPath.tmp"
         if (Test-Path -LiteralPath $tempPfxPath) {
           Remove-Item -LiteralPath $tempPfxPath -Force
         }
-
         try {
-          # Export PFX
           Export-PfxCertificate -Cert $certificate -FilePath $tempPfxPath -Password $securePassword | Out-Null
           Move-Item -LiteralPath $tempPfxPath -Destination $pfxPath -Force
 
-          # Export PEM if requested
+          # Optionally export PEM.
           if ($ExportPem.IsPresent) {
-            # Convert SecureString to plain text temporarily
+            # Convert SecureString password to plain text.
             $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
             $plainPassword = $null
             try {
               $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-              
-              # Re-import PFX with exportable flag
+              # Re-import PFX with exportable private key.
               $pfxCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $pfxPath,
                 $plainPassword,
                 [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
               )
-              
               try {
-                # Export certificate portion
+                # Export certificate portion.
                 $certBytes = $pfxCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-                $certPem = "-----BEGIN CERTIFICATE-----`n" + [Convert]::ToBase64String($certBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END CERTIFICATE-----"
-                
-                # Try to export private key (PowerShell 7+ only)
+                $certBase64 = [System.Convert]::ToBase64String($certBytes)
+                # Wrap at 64 chars per line.
+                $certLines = [System.Text.RegularExpressions.Regex]::Matches($certBase64, '.{1,64}') | ForEach-Object { $_.Value }
+                $certPem = "-----BEGIN CERTIFICATE-----`n" + ($certLines -join "`n") + "`n-----END CERTIFICATE-----"
+
+                # Export private key if PS7+.
                 $keyPem = $null
                 $keyExported = $false
-                
                 if ($PSVersionTable.PSVersion.Major -ge 7) {
-                  # PowerShell 7+ has the export methods
                   try {
                     if ($Algorithm -eq 'RSA') {
                       $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($pfxCert)
                       if ($key) {
                         $keyBytes = $key.ExportRSAPrivateKey()
-                        $keyPem = "`n-----BEGIN RSA PRIVATE KEY-----`n" + [Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END RSA PRIVATE KEY-----"
+                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes)
+                        $keyLines = [System.Text.RegularExpressions.Regex]::Matches($keyBase64, '.{1,64}') | ForEach-Object { $_.Value }
+                        $keyPem = "`n-----BEGIN RSA PRIVATE KEY-----`n" + ($keyLines -join "`n") + "`n-----END RSA PRIVATE KEY-----"
                         [Array]::Clear($keyBytes, 0, $keyBytes.Length)
                         $keyExported = $true
                       }
@@ -286,7 +313,9 @@ function New-SecureStoreCertificate {
                       $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($pfxCert)
                       if ($key) {
                         $keyBytes = $key.ExportECPrivateKey()
-                        $keyPem = "`n-----BEGIN EC PRIVATE KEY-----`n" + [Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END EC PRIVATE KEY-----"
+                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes)
+                        $keyLines = [System.Text.RegularExpressions.Regex]::Matches($keyBase64, '.{1,64}') | ForEach-Object { $_.Value }
+                        $keyPem = "`n-----BEGIN EC PRIVATE KEY-----`n" + ($keyLines -join "`n") + "`n-----END EC PRIVATE KEY-----"
                         [Array]::Clear($keyBytes, 0, $keyBytes.Length)
                         $keyExported = $true
                       }
@@ -296,12 +325,11 @@ function New-SecureStoreCertificate {
                     Write-Warning "Failed to export private key: $($_.Exception.Message)"
                   }
                 }
-                
                 if (-not $keyExported) {
-                  Write-Warning "PEM export: Certificate only (no private key). Private key export requires PowerShell 7+. Use PFX for full functionality or convert with OpenSSL."
+                  Write-Warning "PEM export: Certificate only (no private key). Private key export requires PowerShell 7+. Use PFX for full functionality or convert with OpenSSL."
                 }
-                
-                # Write PEM file
+
+                # Write PEM file.
                 $pemContent = if ($keyPem) { $certPem + $keyPem } else { $certPem }
                 [System.IO.File]::WriteAllText($pemPath, $pemContent, [System.Text.Encoding]::ASCII)
                 [Array]::Clear($certBytes, 0, $certBytes.Length)
@@ -325,7 +353,7 @@ function New-SecureStoreCertificate {
           }
         }
 
-        # Remove from store after export
+        # Remove the certificate from the store after exporting.
         try {
           Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
         }
@@ -334,6 +362,7 @@ function New-SecureStoreCertificate {
         }
       }
 
+      # Return result object.
       [PSCustomObject]@{
         CertificateName = $CertificateName
         Subject         = $subjectName
