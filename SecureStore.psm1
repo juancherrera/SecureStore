@@ -243,14 +243,14 @@ function ConvertTo-SecureStoreSecureString {
     # Recursively convert each entry while preserving array semantics.
     $items = @()
     foreach ($entry in $InputObject) {
-      $items += ,(ConvertTo-SecureStoreSecureString -InputObject $entry)
+      $items += , (ConvertTo-SecureStoreSecureString -InputObject $entry)
     }
 
     if ($items.Count -eq 1) {
       return $items[0]
     }
 
-    return ,$items
+    return , $items
   }
 
   switch ($InputObject) {
