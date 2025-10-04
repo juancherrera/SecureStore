@@ -216,20 +216,23 @@ function Protect-SecureStoreSecretWithCertificate {
       $rng.Dispose()
     }
 
-    # Encrypt the secret with AES-GCM
-    $nonce = New-Object byte[] 12
-    $tag = New-Object byte[] 16
-    $rngForNonce = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-      $rngForNonce.GetBytes($nonce)
-    }
-    finally {
-      $rngForNonce.Dispose()
-    }
-
-    $ciphertext = New-Object byte[] $Plaintext.Length
+    $nonce = $null
+    $tag = $null
+    $iv = $null
+    $ciphertext = $null
 
     if ($script:SupportsAesGcm) {
+      $nonce = New-Object byte[] 12
+      $tag = New-Object byte[] 16
+      $rngForNonce = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+      try {
+        $rngForNonce.GetBytes($nonce)
+      }
+      finally {
+        $rngForNonce.Dispose()
+      }
+
+      $ciphertext = New-Object byte[] $Plaintext.Length
       # Use AES-GCM
       $aesGcm = New-Object -TypeName $script:AesGcmType.FullName -ArgumentList (, $aesKey)
       try {
@@ -244,13 +247,108 @@ function Protect-SecureStoreSecretWithCertificate {
     }
     else {
       # Fallback to AES-CBC + HMAC
-      throw "AES-CBC fallback not implemented for certificate-based encryption. Use PowerShell 7+ or upgrade .NET."
+      $cipherAlgorithm = 'AES-CBC-HMACSHA256'
+
+      $iv = New-Object byte[] 16
+      $rngForIv = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+      try {
+        $rngForIv.GetBytes($iv)
+      }
+      finally {
+        $rngForIv.Dispose()
+      }
+
+      $infoEncryption = [System.Text.Encoding]::UTF8.GetBytes('SecureStore|EncryptionKeyV3')
+      $infoAuthentication = [System.Text.Encoding]::UTF8.GetBytes('SecureStore|HmacKeyV3')
+      $encryptionKey = $null
+      $hmacKey = $null
+
+      $derivationHmac = [System.Security.Cryptography.HMACSHA256]::new($aesKey)
+      try {
+        $encryptionKey = $derivationHmac.ComputeHash($infoEncryption)
+        $hmacKey = $derivationHmac.ComputeHash($infoAuthentication)
+      }
+      finally {
+        $derivationHmac.Dispose()
+        if ($infoEncryption) {
+          [Array]::Clear($infoEncryption, 0, $infoEncryption.Length)
+        }
+        if ($infoAuthentication) {
+          [Array]::Clear($infoAuthentication, 0, $infoAuthentication.Length)
+        }
+      }
+
+      $aesProvider = [System.Security.Cryptography.Aes]::Create()
+      try {
+        $aesProvider.KeySize = 256
+        $aesProvider.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aesProvider.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aesProvider.Key = $encryptionKey
+        $aesProvider.IV = $iv
+
+        $encryptor = $aesProvider.CreateEncryptor()
+        try {
+          $ciphertext = $encryptor.TransformFinalBlock($Plaintext, 0, $Plaintext.Length)
+        }
+        finally {
+          if ($encryptor -is [System.IDisposable]) {
+            $encryptor.Dispose()
+          }
+        }
+      }
+      finally {
+        if ($aesProvider -is [System.IDisposable]) {
+          $aesProvider.Dispose()
+        }
+        if ($encryptionKey) {
+          [Array]::Clear($encryptionKey, 0, $encryptionKey.Length)
+        }
+      }
+
+      $hmacProvider = [System.Security.Cryptography.HMACSHA256]::new($hmacKey)
+      $tag = $null
+      try {
+        $macInput = New-Object byte[] ($iv.Length + $ciphertext.Length)
+        try {
+          [System.Buffer]::BlockCopy($iv, 0, $macInput, 0, $iv.Length)
+          [System.Buffer]::BlockCopy($ciphertext, 0, $macInput, $iv.Length, $ciphertext.Length)
+          $tag = $hmacProvider.ComputeHash($macInput)
+        }
+        finally {
+          [Array]::Clear($macInput, 0, $macInput.Length)
+        }
+      }
+      finally {
+        $hmacProvider.Dispose()
+        if ($hmacKey) {
+          [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+        }
+      }
+
+      [Array]::Clear($iv, 0, $iv.Length)
     }
 
     # Encrypt the AES key with RSA (certificate's public key)
     $encryptedKey = $rsa.Encrypt($aesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
 
     # Build JSON payload
+    $cipherPayload = [ordered]@{
+      Algorithm    = $cipherAlgorithm
+      KeySize      = 256
+      EncryptedKey = [Convert]::ToBase64String($encryptedKey)
+    }
+
+    if ($cipherAlgorithm -eq 'AES-GCM') {
+      $cipherPayload.Nonce = [Convert]::ToBase64String($nonce)
+      $cipherPayload.Tag = [Convert]::ToBase64String($tag)
+      $cipherPayload.CipherText = [Convert]::ToBase64String($ciphertext)
+    }
+    else {
+      $cipherPayload.IV = [Convert]::ToBase64String($iv)
+      $cipherPayload.Hmac = [Convert]::ToBase64String($tag)
+      $cipherPayload.CipherText = [Convert]::ToBase64String($ciphertext)
+    }
+
     $payload = [ordered]@{
       Version          = 3
       EncryptionMethod = 'Certificate'
@@ -260,21 +358,23 @@ function Protect-SecureStoreSecretWithCertificate {
         Algorithm  = 'RSA'
         NotAfter   = $Certificate.NotAfter.ToString('o')
       }
-      Cipher           = [ordered]@{
-        Algorithm    = $cipherAlgorithm
-        KeySize      = 256
-        EncryptedKey = [Convert]::ToBase64String($encryptedKey)
-        Nonce        = [Convert]::ToBase64String($nonce)
-        Tag          = [Convert]::ToBase64String($tag)
-        CipherText   = [Convert]::ToBase64String($ciphertext)
-      }
+      Cipher           = $cipherPayload
     }
 
     # Clean up sensitive data
     [Array]::Clear($aesKey, 0, $aesKey.Length)
-    [Array]::Clear($nonce, 0, $nonce.Length)
-    [Array]::Clear($tag, 0, $tag.Length)
-    [Array]::Clear($ciphertext, 0, $ciphertext.Length)
+    if ($nonce) {
+      [Array]::Clear($nonce, 0, $nonce.Length)
+    }
+    if ($iv) {
+      [Array]::Clear($iv, 0, $iv.Length)
+    }
+    if ($tag) {
+      [Array]::Clear($tag, 0, $tag.Length)
+    }
+    if ($ciphertext) {
+      [Array]::Clear($ciphertext, 0, $ciphertext.Length)
+    }
     [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
 
     return ($payload | ConvertTo-Json -Depth 4)
@@ -340,18 +440,20 @@ function Unprotect-SecureStoreSecretWithCertificate {
     $aesKey = $rsa.Decrypt($encryptedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
 
     # Decrypt the secret using AES
-    $nonce = [Convert]::FromBase64String([string]$data.Cipher.Nonce)
-    $tag = [Convert]::FromBase64String([string]$data.Cipher.Tag)
-    $ciphertext = [Convert]::FromBase64String([string]$data.Cipher.CipherText)
-
-    $plaintext = New-Object byte[] $ciphertext.Length
-
     $cipherAlgorithm = [string]$data.Cipher.Algorithm
+    $ciphertext = [Convert]::FromBase64String([string]$data.Cipher.CipherText)
+    $nonce = $null
+    $tag = $null
+    $plaintext = $null
+
     if ($cipherAlgorithm -eq 'AES-GCM') {
       if (-not $script:SupportsAesGcm) {
         throw "Secret was encrypted with AES-GCM but current runtime does not support it"
       }
 
+      $nonce = [Convert]::FromBase64String([string]$data.Cipher.Nonce)
+      $tag = [Convert]::FromBase64String([string]$data.Cipher.Tag)
+      $plaintext = New-Object byte[] $ciphertext.Length
       $aesGcm = New-Object -TypeName $script:AesGcmType.FullName -ArgumentList (, $aesKey)
       try {
         $aesGcm.Decrypt($nonce, $ciphertext, $tag, $plaintext)
@@ -365,15 +467,114 @@ function Unprotect-SecureStoreSecretWithCertificate {
         }
       }
     }
+    elseif ($cipherAlgorithm -eq 'AES-CBC-HMACSHA256') {
+      $iv = [Convert]::FromBase64String([string]$data.Cipher.IV)
+      $hmac = [Convert]::FromBase64String([string]$data.Cipher.Hmac)
+
+      $infoEncryption = [System.Text.Encoding]::UTF8.GetBytes('SecureStore|EncryptionKeyV3')
+      $infoAuthentication = [System.Text.Encoding]::UTF8.GetBytes('SecureStore|HmacKeyV3')
+      $encryptionKey = $null
+      $hmacKey = $null
+
+      $derivationHmac = [System.Security.Cryptography.HMACSHA256]::new($aesKey)
+      try {
+        $encryptionKey = $derivationHmac.ComputeHash($infoEncryption)
+        $hmacKey = $derivationHmac.ComputeHash($infoAuthentication)
+      }
+      finally {
+        $derivationHmac.Dispose()
+        if ($infoEncryption) {
+          [Array]::Clear($infoEncryption, 0, $infoEncryption.Length)
+        }
+        if ($infoAuthentication) {
+          [Array]::Clear($infoAuthentication, 0, $infoAuthentication.Length)
+        }
+      }
+
+      $hmacProvider = [System.Security.Cryptography.HMACSHA256]::new($hmacKey)
+      $computedHmac = $null
+      try {
+        $macInput = New-Object byte[] ($iv.Length + $ciphertext.Length)
+        try {
+          [System.Buffer]::BlockCopy($iv, 0, $macInput, 0, $iv.Length)
+          [System.Buffer]::BlockCopy($ciphertext, 0, $macInput, $iv.Length, $ciphertext.Length)
+          $computedHmac = $hmacProvider.ComputeHash($macInput)
+        }
+        finally {
+          [Array]::Clear($macInput, 0, $macInput.Length)
+        }
+      }
+      finally {
+        $hmacProvider.Dispose()
+        if ($hmacKey) {
+          [Array]::Clear($hmacKey, 0, $hmacKey.Length)
+        }
+      }
+
+      if (-not (Test-SecureStoreFixedTimeEqual -Left $computedHmac -Right $hmac)) {
+        [Array]::Clear($iv, 0, $iv.Length)
+        [Array]::Clear($hmac, 0, $hmac.Length)
+        if ($computedHmac) {
+          [Array]::Clear($computedHmac, 0, $computedHmac.Length)
+        }
+        if ($encryptionKey) {
+          [Array]::Clear($encryptionKey, 0, $encryptionKey.Length)
+        }
+        throw "Secret integrity check failed or wrong certificate used"
+      }
+
+      if ($computedHmac) {
+        [Array]::Clear($computedHmac, 0, $computedHmac.Length)
+      }
+
+      $aesProvider = [System.Security.Cryptography.Aes]::Create()
+      try {
+        $aesProvider.KeySize = 256
+        $aesProvider.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aesProvider.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aesProvider.Key = $encryptionKey
+        $aesProvider.IV = $iv
+
+        $decryptor = $aesProvider.CreateDecryptor()
+        try {
+          $plaintext = $decryptor.TransformFinalBlock($ciphertext, 0, $ciphertext.Length)
+        }
+        finally {
+          if ($decryptor -is [System.IDisposable]) {
+            $decryptor.Dispose()
+          }
+        }
+      }
+      catch {
+        throw "Secret integrity check failed or wrong certificate used"
+      }
+      finally {
+        if ($aesProvider -is [System.IDisposable]) {
+          $aesProvider.Dispose()
+        }
+        if ($encryptionKey) {
+          [Array]::Clear($encryptionKey, 0, $encryptionKey.Length)
+        }
+      }
+
+      [Array]::Clear($iv, 0, $iv.Length)
+      [Array]::Clear($hmac, 0, $hmac.Length)
+    }
     else {
       throw "Unsupported cipher algorithm: $cipherAlgorithm"
     }
 
     # Clean up sensitive data
     [Array]::Clear($aesKey, 0, $aesKey.Length)
-    [Array]::Clear($nonce, 0, $nonce.Length)
-    [Array]::Clear($tag, 0, $tag.Length)
-    [Array]::Clear($ciphertext, 0, $ciphertext.Length)
+    if ($nonce) {
+      [Array]::Clear($nonce, 0, $nonce.Length)
+    }
+    if ($tag) {
+      [Array]::Clear($tag, 0, $tag.Length)
+    }
+    if ($ciphertext) {
+      [Array]::Clear($ciphertext, 0, $ciphertext.Length)
+    }
     [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
 
     return $plaintext
