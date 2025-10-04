@@ -187,9 +187,13 @@ function New-SecureStoreSecret {
           return
         }
 
+        # Ensure certificate helper functions are available
+        if (-not (Get-Command -Name 'Protect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue)) {
+          . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+        }
+
         # Acquire certificate (from thumbprint or PFX)
         $cert = $null
-        $rsaKey = $null
         if ($PSCmdlet.ParameterSetName -eq 'ByCertPath') {
           $certPw = $CertificatePassword
           if ($certPw -is [System.Security.SecureString]) {
@@ -233,24 +237,9 @@ function New-SecureStoreSecret {
           }
         }
 
-        $rsaKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
-        if (-not $rsaKey) {
-          throw [System.InvalidOperationException]::new("Certificate does not have an RSA public key and cannot be used for encryption.")
-        }
-
         try {
           $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
-          $encryptedBytes = $rsaKey.Encrypt($plaintextBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-
-          $payloadObject = [pscustomobject]@{
-            Version          = 3
-            EncryptionMethod = 'Certificate'
-            CertificateInfo  = [pscustomobject]@{
-              Thumbprint = $cert.Thumbprint
-            }
-            EncryptedData    = [Convert]::ToBase64String($encryptedBytes)
-          }
-          $payloadJson = $payloadObject | ConvertTo-Json -Depth 3
+          $payloadJson = Protect-SecureStoreSecretWithCertificate -Plaintext $plaintextBytes -Certificate $cert
           $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
           try {
             Write-SecureStoreFile -Path $secretFilePath -Bytes $payloadBytes
@@ -261,7 +250,6 @@ function New-SecureStoreSecret {
         }
         finally {
           if ($plaintextBytes) { [Array]::Clear($plaintextBytes, 0, $plaintextBytes.Length) }
-          if ($rsaKey) { $rsaKey.Dispose() }
           if ($cert) { $cert.Dispose() }
         }
       }
