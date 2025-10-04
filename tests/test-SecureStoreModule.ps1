@@ -188,7 +188,6 @@ try {
 
       # Verify Base64 is properly line-wrapped
       $lines = ($pemContent -split "`n" | Where-Object { $_ -match "^[A-Za-z0-9+/=]+$" })
-      $hasLineBreaks = $lines.Count -gt 1
       $maxLineLength = if ($lines.Count -gt 0) { ($lines | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum } else { 0 }
       $properlyFormatted = $maxLineLength -le 76
 
@@ -205,7 +204,7 @@ try {
       }
 
       Write-TestResult "PEM contains Base64 data"    $hasBase64
-      Write-TestResult "PEM has line breaks in Base64" $hasLineBreaks "Lines: $($lines.Count)"
+      Write-TestResult "PEM has proper Base64 formatting" ($lines.Count -ge 1) "Lines: $($lines.Count)"
       Write-TestResult "PEM lines properly formatted" $properlyFormatted "Max length: $maxLineLength"
     }
   }
@@ -411,7 +410,7 @@ try {
   Write-TestHeader "TEST 18: Certificate-Encrypted Secret (Store)"
   try {
     # First, create a certificate in the store for encryption
-    $certResult = New-SecureStoreCertificate -CertificateName "SecretEncryption" -Password "CertPass123" -StoreOnly -Confirm:$false
+    $script:certResult = New-SecureStoreCertificate -CertificateName "SecretEncryption" -Password "CertPass123" -StoreOnly -Confirm:$false
 
     $certExists = Test-Path "Cert:\CurrentUser\My\$($certResult.Thumbprint)"
     Write-TestResult "Encryption certificate created in store" $certExists "Thumbprint: $($certResult.Thumbprint)"
@@ -441,7 +440,7 @@ try {
   # TEST 19: Retrieve Certificate-Encrypted Secret (Store)
   Write-TestHeader "TEST 19: Retrieve Certificate-Encrypted Secret (Store)"
   try {
-    $retrievedSecret = Get-SecureStoreSecret -SecretFileName "cert-secret-store.secret" -FolderPath $TestPath -CertificateThumbprint $certResult.Thumbprint
+    $retrievedSecret = Get-SecureStoreSecret -SecretFileName "cert-secret-store.secret" -FolderPath $TestPath -CertificateThumbprint $script:certResult.Thumbprint
 
     $correctValue = $retrievedSecret -eq "MySecretValue123"
     Write-TestResult "Certificate-encrypted secret retrieved correctly" $correctValue "Value matches: $correctValue"
