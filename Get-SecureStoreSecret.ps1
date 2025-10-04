@@ -198,6 +198,9 @@ function Get-SecureStoreSecret {
       if ($isJson -and $parsed.Version -eq 3 -and $parsed.EncryptionMethod -eq 'Certificate') {
         # ===== Certificate‑based secret (version 3) =====
         # Determine certificate
+        if (-not (Get-Command -Name 'Unprotect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue)) {
+          . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+        }
         $cert = $null
         $privateKey = $null
         if ($CertificatePath) {
@@ -264,13 +267,23 @@ function Get-SecureStoreSecret {
           }
         }
 
-        $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-        if (-not $privateKey) {
-          throw [System.InvalidOperationException]::new('The certificate does not have an RSA private key.')
+        $hasHybridPayload = $false
+        if ($parsed -and $parsed.PSObject.Properties['Cipher']) {
+          $hasHybridPayload = $true
         }
 
-        $encryptedBytes = [Convert]::FromBase64String($parsed.EncryptedData)
-        $plaintextBytes = $privateKey.Decrypt($encryptedBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+        if ($hasHybridPayload) {
+          $plaintextBytes = Unprotect-SecureStoreSecretWithCertificate -Payload $encryptedPayload -Certificate $cert
+        }
+        else {
+          $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+          if (-not $privateKey) {
+            throw [System.InvalidOperationException]::new('The certificate does not have an RSA private key.')
+          }
+
+          $encryptedBytes = [Convert]::FromBase64String($parsed.EncryptedData)
+          $plaintextBytes = $privateKey.Decrypt($encryptedBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+        }
 
         $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
         try {
@@ -330,6 +343,8 @@ function Get-SecureStoreSecret {
       if ($securePassword) { $securePassword.Dispose() }
       if ($plaintextBytes) { [Array]::Clear($plaintextBytes, 0, $plaintextBytes.Length) }
       if ($encryptionKey) { [Array]::Clear($encryptionKey, 0, $encryptionKey.Length) }
+      if ($privateKey) { $privateKey.Dispose() }
+      if ($cert -and ($cert -is [System.IDisposable])) { $cert.Dispose() }
     }
   }
 }
