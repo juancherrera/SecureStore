@@ -133,7 +133,6 @@ function New-SecureStoreCertificate {
   )
 
   begin {
-    # Ensure helper functions are loaded even when the module is dot‑sourced.
     if (-not (Get-Command -Name 'Sync-SecureStoreWorkingDirectory' -ErrorAction SilentlyContinue)) {
       . "$PSScriptRoot/Sync-SecureStoreWorkingDirectory.ps1"
     }
@@ -242,11 +241,12 @@ function New-SecureStoreCertificate {
         $certificateParams['TextExtension'] = $textExtensions
       }
 
-      # Create the certificate.  Retry without custom extensions on PS5 if ECDSA fails.
+      # Create the certificate with error handling for ECDSA with custom extensions.
       try {
         $certificate = New-SelfSignedCertificate @certificateParams
       }
       catch {
+        # ECDSA with custom extensions can fail on some systems
         if ($Algorithm -eq 'ECDSA' -and ($certificateParams.ContainsKey('Type') -or $certificateParams.ContainsKey('TextExtension'))) {
           Write-Warning "ECDSA with SAN/EKU extensions not supported on this system. Creating basic ECDSA certificate."
           $certificateParams.Remove('Type')
@@ -288,10 +288,8 @@ function New-SecureStoreCertificate {
               try {
                 # Export certificate portion.
                 $certBytes = $pfxCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-                $certBase64 = [System.Convert]::ToBase64String($certBytes)
-                # Wrap at 64 chars per line.
-                $certLines = [System.Text.RegularExpressions.Regex]::Matches($certBase64, '.{1,64}') | ForEach-Object { $_.Value }
-                $certPem = "-----BEGIN CERTIFICATE-----`n" + ($certLines -join "`n") + "`n-----END CERTIFICATE-----"
+                $certBase64 = [System.Convert]::ToBase64String($certBytes, [System.Base64FormattingOptions]::InsertLineBreaks)
+                $certPem = "-----BEGIN CERTIFICATE-----`n" + $certBase64 + "`n-----END CERTIFICATE-----"
 
                 # Export private key if PS7+.
                 $keyPem = $null
@@ -302,9 +300,8 @@ function New-SecureStoreCertificate {
                       $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($pfxCert)
                       if ($key) {
                         $keyBytes = $key.ExportRSAPrivateKey()
-                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes)
-                        $keyLines = [System.Text.RegularExpressions.Regex]::Matches($keyBase64, '.{1,64}') | ForEach-Object { $_.Value }
-                        $keyPem = "`n-----BEGIN RSA PRIVATE KEY-----`n" + ($keyLines -join "`n") + "`n-----END RSA PRIVATE KEY-----"
+                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks)
+                        $keyPem = "`n-----BEGIN RSA PRIVATE KEY-----`n" + $keyBase64 + "`n-----END RSA PRIVATE KEY-----"
                         [Array]::Clear($keyBytes, 0, $keyBytes.Length)
                         $keyExported = $true
                       }
@@ -313,9 +310,8 @@ function New-SecureStoreCertificate {
                       $key = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($pfxCert)
                       if ($key) {
                         $keyBytes = $key.ExportECPrivateKey()
-                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes)
-                        $keyLines = [System.Text.RegularExpressions.Regex]::Matches($keyBase64, '.{1,64}') | ForEach-Object { $_.Value }
-                        $keyPem = "`n-----BEGIN EC PRIVATE KEY-----`n" + ($keyLines -join "`n") + "`n-----END EC PRIVATE KEY-----"
+                        $keyBase64 = [System.Convert]::ToBase64String($keyBytes, [System.Base64FormattingOptions]::InsertLineBreaks)
+                        $keyPem = "`n-----BEGIN EC PRIVATE KEY-----`n" + $keyBase64 + "`n-----END EC PRIVATE KEY-----"
                         [Array]::Clear($keyBytes, 0, $keyBytes.Length)
                         $keyExported = $true
                       }
@@ -326,7 +322,7 @@ function New-SecureStoreCertificate {
                   }
                 }
                 if (-not $keyExported) {
-                  Write-Warning "PEM export: Certificate only (no private key). Private key export requires PowerShell 7+. Use PFX for full functionality or convert with OpenSSL."
+                  Write-Warning "PEM export: Certificate only (no private key). Private key export requires PowerShell 7+. Use PFX for full functionality or convert with OpenSSL."
                 }
 
                 # Write PEM file.
