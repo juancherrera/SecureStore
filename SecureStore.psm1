@@ -239,6 +239,20 @@ function ConvertTo-SecureStoreSecureString {
     [object]$InputObject
   )
 
+  if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string]) -and -not ($InputObject -is [System.Security.SecureString])) {
+    # Recursively convert each entry while preserving array semantics.
+    $items = @()
+    foreach ($entry in $InputObject) {
+      $items += ,(ConvertTo-SecureStoreSecureString -InputObject $entry)
+    }
+
+    if ($items.Count -eq 1) {
+      return $items[0]
+    }
+
+    return ,$items
+  }
+
   switch ($InputObject) {
     { $_ -is [System.Security.SecureString] } {
       return $_.Copy()
@@ -260,18 +274,6 @@ function ConvertTo-SecureStoreSecureString {
       finally {
         [Array]::Clear($chars, 0, $chars.Length)
       }
-    }
-    { $_ -is [System.Collections.IEnumerable] -and -not ($_ -is [string]) } {
-      $results = @()
-      foreach ($item in $_) {
-        $results += ConvertTo-SecureStoreSecureString -InputObject $item
-      }
-
-      if ($results.Count -eq 1) {
-        return $results[0]
-      }
-
-      return $results
     }
     default {
       $message = 'Password must be provided as a SecureString or plain text string.'
@@ -355,7 +357,20 @@ function Write-SecureStoreFile {
   try {
     # Write through a temporary file so the final rename is atomic even on network shares.
     $fileStream.Write($Bytes, 0, $Bytes.Length)
-    $fileStream.Flush($true)
+
+    # Flush the buffers to disk. The Flush(bool) overload only exists on some runtimes,
+    # so prefer the parameterless call and invoke the extended overload when available.
+    $fileStream.Flush()
+    $flushWithBool = $fileStream.GetType().GetMethod(
+      'Flush',
+      [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::Public,
+      $null,
+      [System.Type[]]@([bool]),
+      $null
+    )
+    if ($null -ne $flushWithBool) {
+      [void]$flushWithBool.Invoke($fileStream, @($true))
+    }
   }
   finally {
     $fileStream.Dispose()

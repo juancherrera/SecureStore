@@ -3,16 +3,46 @@
 # Add these functions to SecureStore.psm1 after the existing crypto functions
 # ===================================================================
 
+<#
+.SYNOPSIS
+Loads a certificate from disk or the Windows certificate store for SecureStore encryption operations.
+
+.DESCRIPTION
+Get-SecureStoreCertificateForEncryption centralises certificate loading for secret encryption and decryption.
+The function supports locating certificates by thumbprint, subject/friendly name, or file path (.pfx/.pem).
+It optionally enforces that the certificate includes an accessible private key which is required for
+decrypting version 3 secrets. Password prompts accept plain strings or SecureString objects and are zeroised
+after use to avoid leaking sensitive material.
+
+.PARAMETER Thumbprint
+Searches the CurrentUser and LocalMachine personal stores for a matching certificate thumbprint.
+
+.PARAMETER CertificatePath
+Loads a certificate directly from the provided file path. Supports PFX on Windows PowerShell and PFX/PEM on PowerShell 7+.
+
+.PARAMETER Password
+Password used to open the certificate at -CertificatePath. Accepts string or SecureString.
+
+.PARAMETER Subject
+Finds a certificate whose subject or friendly name contains the supplied value.
+
+.PARAMETER RequirePrivateKey
+Ensures the returned certificate exposes a private key suitable for RSA encryption/decryption operations.
+
+.EXAMPLE
+Get-SecureStoreCertificateForEncryption -Thumbprint 'A1B2C3D4E5F6' -RequirePrivateKey
+
+Retrieves the certificate with the specified thumbprint from the local stores and validates that a private key is available.
+
+.EXAMPLE
+Get-SecureStoreCertificateForEncryption -CertificatePath 'C:\SecureStore\certs\api.pfx' -Password (Read-Host 'PFX Password' -AsSecureString)
+
+Opens the PFX file using a secure password prompt and returns the certificate object for encryption tasks.
+
+.NOTES
+PEM files containing private keys require PowerShell 7 or later because earlier versions lack the necessary APIs.
+#>
 function Get-SecureStoreCertificateForEncryption {
-  <#
-    .SYNOPSIS
-    Loads a certificate for secret encryption/decryption operations.
-    
-    .DESCRIPTION
-    Retrieves a certificate from file (.pfx, .pem) or certificate store,
-    validates it's suitable for encryption (RSA with private key), and
-    returns the X509Certificate2 object.
-    #>
   [CmdletBinding()]
   [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
   param(
@@ -38,6 +68,7 @@ function Get-SecureStoreCertificateForEncryption {
   $certificate = $null
 
   try {
+    # Route to the correct loading path based on how the caller identified the certificate.
     switch ($PSCmdlet.ParameterSetName) {
       'ByThumbprint' {
         Write-Verbose "Loading certificate by thumbprint: $Thumbprint"
@@ -166,7 +197,8 @@ function Get-SecureStoreCertificateForEncryption {
     }
 
     Write-Verbose "Certificate loaded successfully: $($certificate.Subject) (Thumbprint: $($certificate.Thumbprint))"
-        
+
+    # Surface the live certificate object to the caller so it can be used for crypto operations.
     return $certificate
   }
   catch {

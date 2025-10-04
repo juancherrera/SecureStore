@@ -51,6 +51,12 @@ function Test-SecureStoreEnvironment {
         $netLocation = [System.IO.Directory]::GetCurrentDirectory()
         $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
 
+        # Evaluate folder existence separately so mocks and filesystem checks remain predictable.
+        $secretExists = Test-Path -LiteralPath $paths.SecretPath
+        if (-not $secretExists -and ($paths.PSObject.Properties.Name -contains 'LegacySecretPath') -and $paths.LegacySecretPath) {
+            $secretExists = [System.IO.Directory]::Exists($paths.LegacySecretPath)
+        }
+
         $status = [PSCustomObject]@{
             Locations = [PSCustomObject]@{
                 PowerShell = $psLocation
@@ -62,7 +68,7 @@ function Test-SecureStoreEnvironment {
                 BasePath    = $paths.BasePath
                 BaseExists  = Test-Path -LiteralPath $paths.BasePath
                 BinExists   = Test-Path -LiteralPath $paths.BinPath
-                SecretExists = (Test-Path -LiteralPath $paths.SecretPath) -or (($paths | Get-Member -Name 'LegacySecretPath' -ErrorAction SilentlyContinue) -and $paths.LegacySecretPath -and (Test-Path -LiteralPath $paths.LegacySecretPath))
+                SecretExists = $secretExists
                 CertsExists = Test-Path -LiteralPath $paths.CertsPath
             }
         }

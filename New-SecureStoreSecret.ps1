@@ -52,6 +52,9 @@ New-SecureStoreSecret -SecretFileName 'cert.secret' -Password 'secret' `
   -CertificateThumbprint 'ABCDEF1234...' -FolderPath 'C:\SecureStore'
 
 Encrypts secret with the specified certificate (version 3).
+
+.NOTES
+Secrets are encrypted at rest and overwrite operations honour ShouldProcess for safety.
 #>
 function New-SecureStoreSecret {
   [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'ByKey')]

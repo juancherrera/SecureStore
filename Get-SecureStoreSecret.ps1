@@ -43,6 +43,19 @@ Password used to open the PFX file specified by -CertificatePath.
 
 .OUTPUTS
 System.String or System.Management.Automation.PSCredential.
+
+.EXAMPLE
+Get-SecureStoreSecret -KeyName 'WebApp' -SecretFileName 'service.secret'
+
+Retrieves the decrypted secret value stored for WebApp and returns it as plain text.
+
+.EXAMPLE
+Get-SecureStoreSecret -SecretFileName 'service.secret' -CertificateThumbprint 'ABC123' -AsCredential -UserName 'svc-web'
+
+Decrypts a certificate-protected secret and returns it as a PSCredential using the provided user name.
+
+.NOTES
+Certificate-based secrets (version 3) require access to the private key either via LocalMachine/CurrentUser certificate stores or by providing a PFX path/password.
 #>
 function Get-SecureStoreSecret {
   [CmdletBinding(DefaultParameterSetName = 'ByName')]
