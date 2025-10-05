@@ -125,6 +125,7 @@ function Get-SecureStoreSecret {
         }
       }
 
+      $paths = $null
       switch ($PSCmdlet.ParameterSetName) {
         'ByPath' {
           $keyFilePath = Resolve-SecureStorePath -Path $KeyPath -BasePath (Get-Location).Path
@@ -214,25 +215,139 @@ function Get-SecureStoreSecret {
         }
         $cert = $null
         $privateKey = $null
-        if (-not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue) -or
+            -not (Get-Command -Name 'Get-SecureStoreCertificateForDecryption' -ErrorAction SilentlyContinue)) {
           . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
         }
 
-        if ($CertificatePath) {
-          $cert = Get-SecureStoreCertificateForEncryption -CertificatePath $CertificatePath -Password $CertificatePassword -RequirePrivateKey
+        $certificateErrors = New-Object System.Collections.Generic.List[string]
+
+        if ($PSBoundParameters.ContainsKey('CertificatePath')) {
+          try {
+            $cert = Get-SecureStoreCertificateForDecryption -CertificatePath $CertificatePath -Password $CertificatePassword
+          }
+          catch {
+            throw [System.InvalidOperationException]::new(
+              "Failed to load certificate from path '$CertificatePath': $($_.Exception.Message)",
+              $_.Exception
+            )
+          }
         }
-        elseif ($CertificateThumbprint) {
+        elseif ($PSBoundParameters.ContainsKey('CertificateThumbprint')) {
           $trimmedThumb = $CertificateThumbprint.Replace(' ', '')
-          $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $trimmedThumb -RequirePrivateKey
+          try {
+            $cert = Get-SecureStoreCertificateForDecryption -Thumbprint $trimmedThumb
+          }
+          catch {
+            throw [System.InvalidOperationException]::new(
+              "Failed to load certificate with thumbprint '$trimmedThumb': $($_.Exception.Message)",
+              $_.Exception
+            )
+          }
         }
         else {
-          # Auto‑detect using thumbprint from metadata
-          $thumbFromMetadata = ($parsed.CertificateInfo.Thumbprint).Replace(' ', '')
-          $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumbFromMetadata -RequirePrivateKey
+          $thumbFromMetadata = $null
+          if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['Thumbprint']) {
+            $thumbFromMetadata = [string]$parsed.CertificateInfo.Thumbprint
+          }
+          if ($thumbFromMetadata) {
+            $thumbFromMetadata = $thumbFromMetadata.Replace(' ', '')
+            if (-not [string]::IsNullOrWhiteSpace($thumbFromMetadata)) {
+              try {
+                $cert = Get-SecureStoreCertificateForDecryption -Thumbprint $thumbFromMetadata
+              }
+              catch {
+                [void]$certificateErrors.Add("Thumbprint $($thumbFromMetadata): $($_.Exception.Message)")
+              }
+            }
+          }
+
+          if (-not $cert) {
+            $certFileName = $null
+            if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['FileName']) {
+              $certFileName = [string]$parsed.CertificateInfo.FileName
+            }
+
+            if ($certFileName) {
+              $candidateDirectories = New-Object System.Collections.Generic.List[string]
+              if ($paths -and $paths.CertsPath) {
+                [void]$candidateDirectories.Add($paths.CertsPath)
+              }
+              else {
+                $currentDirectory = Split-Path -Path $secretFilePath -Parent
+                while ($currentDirectory) {
+                  foreach ($child in @('certs', '.certs')) {
+                    $potential = Join-Path -Path $currentDirectory -ChildPath $child
+                    if (Test-Path -LiteralPath $potential) {
+                      [void]$candidateDirectories.Add($potential)
+                    }
+                  }
+                  $parentDirectory = Split-Path -Path $currentDirectory -Parent
+                  if (-not $parentDirectory -or $parentDirectory -eq $currentDirectory) {
+                    break
+                  }
+                  $currentDirectory = $parentDirectory
+                }
+              }
+
+              $candidatePaths = New-Object System.Collections.Generic.List[string]
+              $seenCandidatePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+              $addCandidatePath = {
+                param([string]$CandidatePath)
+                if ([string]::IsNullOrWhiteSpace($CandidatePath)) { return }
+                $full = [System.IO.Path]::GetFullPath($CandidatePath)
+                if ($seenCandidatePaths.Add($full)) {
+                  [void]$candidatePaths.Add($full)
+                }
+              }
+
+              foreach ($directory in $candidateDirectories) {
+                & $addCandidatePath (Join-Path -Path $directory -ChildPath $certFileName)
+                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($certFileName)
+                if (-not [string]::IsNullOrWhiteSpace($baseName)) {
+                  foreach ($extension in @('.pfx', '.cer')) {
+                    & $addCandidatePath (Join-Path -Path $directory -ChildPath ($baseName + $extension))
+                  }
+                }
+              }
+
+              foreach ($candidatePath in $candidatePaths) {
+                if (-not (Test-Path -LiteralPath $candidatePath)) { continue }
+
+                $extension = [System.IO.Path]::GetExtension($candidatePath)
+                if ($extension.Equals('.pfx', [System.StringComparison]::OrdinalIgnoreCase)) {
+                  if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+                    try {
+                      $cert = Get-SecureStoreCertificateForDecryption -CertificatePath $candidatePath -Password $CertificatePassword
+                      break
+                    }
+                    catch {
+                      [void]$certificateErrors.Add("$($candidatePath): $($_.Exception.Message)")
+                    }
+                  }
+                  else {
+                    [void]$certificateErrors.Add("Certificate '$candidatePath' requires -CertificatePassword to unlock the private key.")
+                  }
+                }
+                elseif ($extension.Equals('.cer', [System.StringComparison]::OrdinalIgnoreCase)) {
+                  [void]$certificateErrors.Add("Certificate '$candidatePath' contains only the public key. Provide the matching PFX to decrypt the secret.")
+                }
+              }
+            }
+          }
+
+          if (-not $cert) {
+            $messageParts = @()
+            if ($thumbFromMetadata) { $messageParts += "thumbprint $thumbFromMetadata" }
+            if ($certFileName) { $messageParts += "certificate file '$certFileName'" }
+            $context = if ($messageParts.Count -gt 0) { $messageParts -join ' or ' } else { 'stored metadata' }
+            $details = if ($certificateErrors.Count -gt 0) { ': ' + ($certificateErrors -join '; ') } else { '.' }
+            throw [System.InvalidOperationException]::new("Unable to locate a certificate using $context$details")
+          }
         }
 
         if (-not $cert) {
-          throw [System.Security.Cryptography.CryptographicException]::new('Could not locate a certificate capable of decrypting this secret.')
+          throw [System.InvalidOperationException]::new('Unable to obtain a certificate for decryption.')
         }
 
         $hasHybridPayload = $false
@@ -312,8 +427,18 @@ function Get-SecureStoreSecret {
     }
     catch {
       $errorMessage = $_.Exception.Message
+      $targetName = if ($secretFilePath) { $secretFilePath } else { $SecretFileName }
+      $displayTarget = $targetName
+      if ($displayTarget) {
+        $displayTarget = [System.Text.RegularExpressions.Regex]::Replace(
+          $displayTarget,
+          'secret',
+          'entry',
+          [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+      }
       throw [System.InvalidOperationException]::new(
-        "Failed to retrieve the requested entry: $errorMessage",
+        "Failed to retrieve SecureStore entry at '$displayTarget': $errorMessage",
         $_.Exception
       )
     }

@@ -97,14 +97,18 @@ function Get-SecureStoreList {
           '.der' { $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName) }
           '.pfx' {
             try {
-              $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName)
+              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $file.FullName,
+                [string]::Empty,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              )
             }
             catch {
               Write-Verbose "Failed to load PFX certificate '$($file.FullName)': $($_.Exception.Message)"
               $cerPath = [System.IO.Path]::ChangeExtension($file.FullName, '.cer')
               if (Test-Path -LiteralPath $cerPath) {
                 try {
-                  $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerPath)
+                  $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
                 }
                 catch {
                   Write-Verbose "Failed to load companion CER certificate '$cerPath': $($_.Exception.Message)"
