@@ -647,51 +647,42 @@ function Unprotect-SecureStoreSecretWithCertificate {
     }
 
     $rsa = $null
-    $rsaFromExtension = $null
     $encryptedKey = $null
     $aesKey = $null
+    $nonce = $null
+    $tag = $null
+    $ciphertext = $null
+
+    # Get RSA private key using modern APIs when available
+    $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+
+    if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
+      throw [System.InvalidOperationException]::new('Failed to retrieve RSA private key from certificate.')
+    }
+
+    # Decrypt the AES key using RSA private key
+    $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
+    $preferredPadding = switch ($data.CertificatePadding) {
+      'OaepSHA256' { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
+      'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
+      default      { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
+    }
 
     try {
-      # Get RSA private key using modern APIs when available
-      $rsaFromExtension = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
-      $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PrivateKey }
-
-      if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
-        throw [System.InvalidOperationException]::new('Failed to retrieve RSA private key from certificate.')
-      }
-
-      # Decrypt the AES key using RSA private key
-      $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
-      $preferredPadding = switch ($data.CertificatePadding) {
-        'OaepSHA256' { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
-        'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
-        default      { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
-      }
-
-      try {
-        $aesKey = $rsa.Decrypt($encryptedKey, $preferredPadding)
-      }
-      catch {
-        $aesKey = $rsa.Decrypt(
-          $encryptedKey,
-          [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1
-        )
-      }
+      $aesKey = $rsa.Decrypt($encryptedKey, $preferredPadding)
     }
-    finally {
-      if ($rsa -and ($rsa -is [System.IDisposable])) {
-        $rsa.Dispose()
+    catch {
+      if ($preferredPadding -ne [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1) {
+        $aesKey = $rsa.Decrypt($encryptedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
       }
-      elseif ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
-        $rsaFromExtension.Dispose()
+      else {
+        throw
       }
     }
 
     # Decrypt the secret using AES
     $cipherAlgorithm = [string]$data.Cipher.Algorithm
     $ciphertext = [Convert]::FromBase64String([string]$data.Cipher.CipherText)
-    $nonce = $null
-    $tag = $null
     $plaintext = $null
 
     if ($cipherAlgorithm -eq 'AES-GCM') {
@@ -813,6 +804,18 @@ function Unprotect-SecureStoreSecretWithCertificate {
     }
 
     # Clean up sensitive data
+    return $plaintext
+  }
+  catch {
+    throw [System.InvalidOperationException]::new(
+      "Failed to decrypt secret with certificate: $($_.Exception.Message)",
+      $_.Exception
+    )
+  }
+  finally {
+    if ($rsa -and ($rsa -is [System.IDisposable])) {
+      $rsa.Dispose()
+    }
     if ($aesKey) {
       [Array]::Clear($aesKey, 0, $aesKey.Length)
     }
@@ -828,13 +831,5 @@ function Unprotect-SecureStoreSecretWithCertificate {
     if ($encryptedKey) {
       [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
     }
-
-    return $plaintext
-  }
-  catch {
-    throw [System.InvalidOperationException]::new(
-      "Failed to decrypt secret with certificate: $($_.Exception.Message)",
-      $_.Exception
-    )
   }
 }
