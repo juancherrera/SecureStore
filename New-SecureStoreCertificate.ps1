@@ -257,7 +257,10 @@ function New-SecureStoreCertificate {
     [switch]$ExportPem,
 
     [Parameter(ParameterSetName = 'StoreOnly')]
-    [switch]$StoreOnly
+    [switch]$StoreOnly,
+
+    [Parameter(ParameterSetName = 'Export')]
+    [switch]$CleanupStore
   )
 
   begin {
@@ -273,6 +276,8 @@ function New-SecureStoreCertificate {
     $pemPath = $null
     $cerPath = $null
     $selfSignedCommand = Get-Command -Name 'New-SelfSignedCertificate' -ErrorAction SilentlyContinue
+    $storePath = $null
+    $storeCertificateAdded = $false
 
     try {
       # Convert the supplied password to SecureString and validate it.
@@ -394,24 +399,108 @@ function New-SecureStoreCertificate {
         $certificate = Invoke-SecureStoreSelfSignedCertificate -Subject $subjectName -CertificateName $CertificateName -Algorithm $Algorithm -ValidityYears $ValidityYears -KeyLength $KeyLength -CurveName $CurveName -DnsName $DnsName -IpAddress $IpAddress -Email $Email -Uri $Uri -EnhancedKeyUsage $EnhancedKeyUsage
       }
 
-      # Export or keep in store.
-      if ($StoreOnly.IsPresent) {
-        if (-not $selfSignedCommand) {
+      $storePath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
+
+      Initialize-SecureStoreCertificateStore
+      $certDrive = Get-PSDrive -Name 'Cert' -ErrorAction SilentlyContinue
+      $usingFallbackStore = $false
+      $fallbackStoreFilePath = $null
+      if ($certDrive -and $certDrive.Provider) {
+        $usingFallbackStore = ($certDrive.Provider.Name -ne 'Certificate')
+        if ($usingFallbackStore) {
+          $fallbackStoreFilePath = [System.IO.Path]::Combine($certDrive.Root, 'CurrentUser', 'My', $certificate.Thumbprint)
+        }
+      }
+
+      if (-not $selfSignedCommand) {
+        $storeCertificate = $certificate
+        $storeCertificateNeedsDispose = $false
+        $storePfxBytes = $null
+        $storePlainPassword = $null
+        $storeBstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+        try {
+          $storePlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($storeBstr)
+          $storePfxBytes = $certificate.Export(
+            [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+            $storePlainPassword
+          )
+          $storeCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $storePfxBytes,
+            $storePlainPassword,
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+          )
           try {
-            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
-            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-            try {
-              $store.Add($certificate)
-            }
-            finally {
-              $store.Close()
-            }
+            $storeCertificate.FriendlyName = $CertificateName
           }
           catch {
-            Write-Warning "Failed to persist certificate to Cert:\\CurrentUser\\My: $($_.Exception.Message)"
+            Write-Verbose "FriendlyName not supported on this platform."
+          }
+          $storeCertificateNeedsDispose = $true
+        }
+        finally {
+          [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($storeBstr)
+          if ($storePlainPassword) {
+            $chars = $storePlainPassword.ToCharArray()
+            [Array]::Clear($chars, 0, $chars.Length)
+          }
+          if ($storePfxBytes) {
+            [Array]::Clear($storePfxBytes, 0, $storePfxBytes.Length)
           }
         }
-        Write-Verbose "Certificate '$CertificateName' created in Cert:\CurrentUser\My\$($certificate.Thumbprint)"
+
+        try {
+          $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+            'My',
+            [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+          )
+          $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+          try {
+            $store.Add($storeCertificate)
+            $storeCertificateAdded = $true
+          }
+          finally {
+            $store.Close()
+          }
+        }
+        catch {
+          Write-Warning "Failed to persist certificate to Cert:\\CurrentUser\\My: $($_.Exception.Message)"
+        }
+        finally {
+          if ($storeCertificateNeedsDispose -and $storeCertificate -is [System.IDisposable]) {
+            $storeCertificate.Dispose()
+          }
+        }
+      }
+      else {
+        $storeCertificateAdded = $true
+      }
+
+      $cachePfxBytes = $null
+      try {
+        $cachePfxBytes = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, [string]::Empty)
+        if ($cachePfxBytes) {
+          Set-SecureStoreCachedCertificate -Thumbprint $certificate.Thumbprint -PfxBytes $cachePfxBytes
+          if ($usingFallbackStore -and $fallbackStoreFilePath) {
+            try {
+              Write-SecureStoreFile -Path $fallbackStoreFilePath -Bytes $cachePfxBytes
+              $storeCertificateAdded = $true
+            }
+            catch {
+              Write-Warning "Failed to write fallback certificate file '$storePath': $($_.Exception.Message)"
+            }
+          }
+        }
+      }
+      finally {
+        if ($cachePfxBytes) {
+          [Array]::Clear($cachePfxBytes, 0, $cachePfxBytes.Length)
+        }
+      }
+
+      # Export or keep in store.
+      if ($StoreOnly.IsPresent) {
+        Write-Verbose "Certificate '$CertificateName' created in $storePath"
       }
       else {
         # Export PFX using the helper for atomic writes.
@@ -518,7 +607,37 @@ function New-SecureStoreCertificate {
           }
         }
 
-        Write-Verbose "Certificate '$CertificateName' retained in Cert:\CurrentUser\My\$($certificate.Thumbprint) for reuse."
+        if ($CleanupStore.IsPresent) {
+          if ($storeCertificateAdded -and -not $usingFallbackStore) {
+            try {
+              $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+                'My',
+                [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+              )
+              $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              try {
+                $matching = $store.Certificates | Where-Object { $_.Thumbprint -eq $certificate.Thumbprint }
+                foreach ($item in $matching) {
+                  $store.Remove($item)
+                }
+              }
+              finally {
+                $store.Close()
+              }
+            }
+            catch {
+              Write-Warning "Failed to remove certificate from Cert:\\CurrentUser\\My during cleanup: $($_.Exception.Message)"
+            }
+          }
+          if ($usingFallbackStore -and $fallbackStoreFilePath) {
+            Remove-Item -LiteralPath $fallbackStoreFilePath -Force -ErrorAction SilentlyContinue
+          }
+          Remove-SecureStoreCachedCertificate -Thumbprint $certificate.Thumbprint
+          Write-Verbose "Certificate '$CertificateName' exported to '$pfxPath' and removed from $storePath after cleanup."
+        }
+        else {
+          Write-Verbose "Certificate '$CertificateName' retained in $storePath for reuse."
+        }
       }
 
       # Return result object.
@@ -530,7 +649,9 @@ function New-SecureStoreCertificate {
         CurveName       = if ($Algorithm -eq 'ECDSA') { $CurveName } else { $null }
         Thumbprint      = $certificate.Thumbprint
         NotAfter        = $certificate.NotAfter
-        StoreLocation   = if ($StoreOnly) { "Cert:\CurrentUser\My\$($certificate.Thumbprint)" } else { $null }
+        StoreLocation   = if ($StoreOnly) { $storePath }
+                          elseif (-not $CleanupStore -and $storeCertificateAdded) { $storePath }
+                          else { $null }
         Paths           = if (-not $StoreOnly) {
           [PSCustomObject]@{
             Pfx = $pfxPath
