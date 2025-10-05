@@ -161,10 +161,14 @@ function Get-SecureStoreCachedCertificate {
   $copy = New-Object byte[] $cachedBytes.Length
   [System.Buffer]::BlockCopy($cachedBytes, 0, $copy, 0, $cachedBytes.Length)
   try {
+    $importFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
+      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
+      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+
     return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
       $copy,
       [string]::Empty,
-      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+      $importFlags
     )
   }
   finally {
