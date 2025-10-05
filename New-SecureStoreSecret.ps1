@@ -209,8 +209,21 @@ function New-SecureStoreSecret {
 
         try {
           $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
+          $certificateMetadata = @{}
+          if ($PSCmdlet.ParameterSetName -eq 'ByCertPath') {
+            $certFileName = [System.IO.Path]::GetFileName($CertificatePath)
+            if (-not [string]::IsNullOrWhiteSpace($certFileName)) {
+              $certificateMetadata['FileName'] = $certFileName
+            }
+          }
+
+          $protectParameters = @{ Plaintext = $plaintextBytes; Certificate = $cert }
+          if ($certificateMetadata.Count -gt 0) {
+            $protectParameters['CertificateMetadata'] = $certificateMetadata
+          }
+
           try {
-            $payloadJson = Protect-SecureStoreSecretWithCertificate -Plaintext $plaintextBytes -Certificate $cert
+            $payloadJson = Protect-SecureStoreSecretWithCertificate @protectParameters
           }
           catch {
             throw [System.InvalidOperationException]::new(

@@ -279,6 +279,37 @@ function Get-SecureStoreCertificateForEncryption {
   }
 }
 
+function Get-SecureStoreCertificateForDecryption {
+  [CmdletBinding(DefaultParameterSetName = 'ByThumbprint')]
+  [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
+  param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'ByThumbprint')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Thumbprint,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'ByPath')]
+    [ValidateNotNullOrEmpty()]
+    [string]$CertificatePath,
+
+    [Parameter(ParameterSetName = 'ByPath')]
+    [object]$Password
+  )
+
+  switch ($PSCmdlet.ParameterSetName) {
+    'ByThumbprint' {
+      return Get-SecureStoreCertificateForEncryption -Thumbprint $Thumbprint -RequirePrivateKey
+    }
+    'ByPath' {
+      if ($PSBoundParameters.ContainsKey('Password')) {
+        return Get-SecureStoreCertificateForEncryption -CertificatePath $CertificatePath -Password $Password -RequirePrivateKey
+      }
+      else {
+        return Get-SecureStoreCertificateForEncryption -CertificatePath $CertificatePath -RequirePrivateKey
+      }
+    }
+  }
+}
+
 function Protect-SecureStoreSecretWithCertificate {
   <#
     .SYNOPSIS
@@ -298,7 +329,10 @@ function Protect-SecureStoreSecretWithCertificate {
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNull()]
-    [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+
+    [Parameter()]
+    [System.Collections.IDictionary]$CertificateMetadata
   )
 
   try {
@@ -467,21 +501,35 @@ function Protect-SecureStoreSecretWithCertificate {
       $cipherPayload.CipherText = [Convert]::ToBase64String($ciphertext)
     }
 
-    $payload = [ordered]@{
-      Version          = 3
-      EncryptionMethod = 'Certificate'
-      CertificatePadding = $rsaPadding
-      CertificateInfo  = [ordered]@{
-        Thumbprint = $Certificate.Thumbprint
-        Subject    = $Certificate.Subject
-        Algorithm  = 'RSA'
-        NotAfter   = $Certificate.NotAfter.ToString('o')
+    $certificateInfo = [ordered]@{
+      Thumbprint = $Certificate.Thumbprint
+      Subject    = $Certificate.Subject
+      Algorithm  = 'RSA'
+      NotAfter   = $Certificate.NotAfter.ToString('o')
+    }
+
+    if ($CertificateMetadata) {
+      foreach ($entry in $CertificateMetadata.GetEnumerator()) {
+        $key = [string]$entry.Key
+        if ([string]::IsNullOrWhiteSpace($key)) {
+          continue
+        }
+        $certificateInfo[$key] = $entry.Value
       }
-      Cipher           = $cipherPayload
+    }
+
+    $payload = [ordered]@{
+      Version            = 3
+      EncryptionMethod   = 'Certificate'
+      CertificatePadding = $rsaPadding
+      CertificateInfo    = $certificateInfo
+      Cipher             = $cipherPayload
     }
 
     # Clean up sensitive data
-    [Array]::Clear($aesKey, 0, $aesKey.Length)
+    if ($aesKey) {
+      [Array]::Clear($aesKey, 0, $aesKey.Length)
+    }
     if ($nonce) {
       [Array]::Clear($nonce, 0, $nonce.Length)
     }
@@ -494,7 +542,9 @@ function Protect-SecureStoreSecretWithCertificate {
     if ($ciphertext) {
       [Array]::Clear($ciphertext, 0, $ciphertext.Length)
     }
-    [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
+    if ($encryptedKey) {
+      [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
+    }
 
     return ($payload | ConvertTo-Json -Depth 4)
   }
@@ -545,18 +595,20 @@ function Unprotect-SecureStoreSecretWithCertificate {
       throw "Certificate does not have a private key. Cannot decrypt secret."
     }
 
-    # Get RSA private key
-    $rsaFromExtension = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
-    $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PrivateKey }
-
-    if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
-      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
-        $rsaFromExtension.Dispose()
-      }
-      throw "Failed to retrieve RSA private key from certificate"
-    }
+    $rsa = $null
+    $rsaFromExtension = $null
+    $encryptedKey = $null
+    $aesKey = $null
 
     try {
+      # Get RSA private key using modern APIs when available
+      $rsaFromExtension = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+      $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PrivateKey }
+
+      if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
+        throw "Failed to retrieve RSA private key from certificate"
+      }
+
       # Decrypt the AES key using RSA private key
       $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
       $preferredPadding = switch ($data.CertificatePadding) {
@@ -580,6 +632,9 @@ function Unprotect-SecureStoreSecretWithCertificate {
     finally {
       if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
         $rsaFromExtension.Dispose()
+      }
+      elseif ($rsa -and ($rsa -is [System.IDisposable])) {
+        $rsa.Dispose()
       }
     }
 
