@@ -612,8 +612,8 @@ function Unprotect-SecureStoreSecretWithCertificate {
       # Decrypt the AES key using RSA private key
       $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
       $preferredPadding = switch ($data.CertificatePadding) {
-        'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
         'OaepSHA256' { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
+        'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
         default      { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
       }
 
@@ -621,20 +621,18 @@ function Unprotect-SecureStoreSecretWithCertificate {
         $aesKey = $rsa.Decrypt($encryptedKey, $preferredPadding)
       }
       catch {
-        if ($preferredPadding -ne [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1) {
-          $aesKey = $rsa.Decrypt($encryptedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
-        }
-        else {
-          throw
-        }
+        $aesKey = $rsa.Decrypt(
+          $encryptedKey,
+          [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1
+        )
       }
     }
     finally {
-      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
-        $rsaFromExtension.Dispose()
-      }
-      elseif ($rsa -and ($rsa -is [System.IDisposable])) {
+      if ($rsa -and ($rsa -is [System.IDisposable])) {
         $rsa.Dispose()
+      }
+      elseif ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
+        $rsaFromExtension.Dispose()
       }
     }
 
@@ -764,7 +762,9 @@ function Unprotect-SecureStoreSecretWithCertificate {
     }
 
     # Clean up sensitive data
-    [Array]::Clear($aesKey, 0, $aesKey.Length)
+    if ($aesKey) {
+      [Array]::Clear($aesKey, 0, $aesKey.Length)
+    }
     if ($nonce) {
       [Array]::Clear($nonce, 0, $nonce.Length)
     }
@@ -774,11 +774,16 @@ function Unprotect-SecureStoreSecretWithCertificate {
     if ($ciphertext) {
       [Array]::Clear($ciphertext, 0, $ciphertext.Length)
     }
-    [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
+    if ($encryptedKey) {
+      [Array]::Clear($encryptedKey, 0, $encryptedKey.Length)
+    }
 
     return $plaintext
   }
   catch {
-    throw [System.InvalidOperationException]::new('Failed to decrypt secret with certificate.', $_.Exception)
+    throw [System.InvalidOperationException]::new(
+      "Failed to decrypt secret with certificate: $($_.Exception.Message)",
+      $_.Exception
+    )
   }
 }

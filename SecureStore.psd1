@@ -54,7 +54,7 @@
       Tags                       = @('Security', 'Secrets', 'Certificates', 'Encryption', 'LocalStorage', 'AES', 'PKI')
 
       # Release notes for this module
-      ReleaseNotes               = 'Version 2.0.0: Centralized storage, standardized folder structure, integrated certificate generation'
+      ReleaseNotes               = 'Version 2.0.1: Restored certificate decryption with padding fallback, automatic certificate discovery, and seamless v2/v3 secret retrieval'
 
       # Prerelease string for this module
       Prerelease                 = ''

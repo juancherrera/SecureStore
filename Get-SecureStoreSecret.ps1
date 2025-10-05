@@ -207,221 +207,141 @@ function Get-SecureStoreSecret {
         $isJson = $false
       }
 
-      if ($isJson -and $parsed.Version -eq 3 -and $parsed.EncryptionMethod -eq 'Certificate') {
-        # ===== Certificate‑based secret (version 3) =====
-        # Determine certificate
-        if (-not (Get-Command -Name 'Unprotect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue)) {
-          . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+      # Determine payload version to support both AES (v2) and certificate (v3) secrets.
+      $secretVersion = 2
+      if ($isJson -and $parsed.PSObject.Properties['Version']) {
+        $versionCandidate = [string]$parsed.Version
+        $parsedVersion = 0
+        if ([int]::TryParse($versionCandidate, [ref]$parsedVersion)) {
+          $secretVersion = $parsedVersion
         }
-        $cert = $null
-        $privateKey = $null
-        if (-not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue) -or
-            -not (Get-Command -Name 'Get-SecureStoreCertificateForDecryption' -ErrorAction SilentlyContinue)) {
-          . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
-        }
-
-        $certificateErrors = New-Object System.Collections.Generic.List[string]
-
-        if ($PSBoundParameters.ContainsKey('CertificatePath')) {
-          try {
-            $cert = Get-SecureStoreCertificateForDecryption -CertificatePath $CertificatePath -Password $CertificatePassword
-          }
-          catch {
-            throw [System.InvalidOperationException]::new(
-              "Failed to load certificate from path '$CertificatePath': $($_.Exception.Message)",
-              $_.Exception
-            )
-          }
-        }
-        elseif ($PSBoundParameters.ContainsKey('CertificateThumbprint')) {
-          $trimmedThumb = $CertificateThumbprint.Replace(' ', '')
-          try {
-            $cert = Get-SecureStoreCertificateForDecryption -Thumbprint $trimmedThumb
-          }
-          catch {
-            throw [System.InvalidOperationException]::new(
-              "Failed to load certificate with thumbprint '$trimmedThumb': $($_.Exception.Message)",
-              $_.Exception
-            )
-          }
-        }
-        else {
-          $thumbFromMetadata = $null
-          if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['Thumbprint']) {
-            $thumbFromMetadata = [string]$parsed.CertificateInfo.Thumbprint
-          }
-          if ($thumbFromMetadata) {
-            $thumbFromMetadata = $thumbFromMetadata.Replace(' ', '')
-            if (-not [string]::IsNullOrWhiteSpace($thumbFromMetadata)) {
-              try {
-                $cert = Get-SecureStoreCertificateForDecryption -Thumbprint $thumbFromMetadata
-              }
-              catch {
-                [void]$certificateErrors.Add("Thumbprint $($thumbFromMetadata): $($_.Exception.Message)")
-              }
-            }
-          }
-
-          if (-not $cert) {
-            $certFileName = $null
-            if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['FileName']) {
-              $certFileName = [string]$parsed.CertificateInfo.FileName
-            }
-
-            if ($certFileName) {
-              $candidateDirectories = New-Object System.Collections.Generic.List[string]
-              if ($paths -and $paths.CertsPath) {
-                [void]$candidateDirectories.Add($paths.CertsPath)
-              }
-              else {
-                $currentDirectory = Split-Path -Path $secretFilePath -Parent
-                while ($currentDirectory) {
-                  foreach ($child in @('certs', '.certs')) {
-                    $potential = Join-Path -Path $currentDirectory -ChildPath $child
-                    if (Test-Path -LiteralPath $potential) {
-                      [void]$candidateDirectories.Add($potential)
-                    }
-                  }
-                  $parentDirectory = Split-Path -Path $currentDirectory -Parent
-                  if (-not $parentDirectory -or $parentDirectory -eq $currentDirectory) {
-                    break
-                  }
-                  $currentDirectory = $parentDirectory
-                }
-              }
-
-              $candidatePaths = New-Object System.Collections.Generic.List[string]
-              $seenCandidatePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-              $addCandidatePath = {
-                param([string]$CandidatePath)
-                if ([string]::IsNullOrWhiteSpace($CandidatePath)) { return }
-                $full = [System.IO.Path]::GetFullPath($CandidatePath)
-                if ($seenCandidatePaths.Add($full)) {
-                  [void]$candidatePaths.Add($full)
-                }
-              }
-
-              foreach ($directory in $candidateDirectories) {
-                & $addCandidatePath (Join-Path -Path $directory -ChildPath $certFileName)
-                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($certFileName)
-                if (-not [string]::IsNullOrWhiteSpace($baseName)) {
-                  foreach ($extension in @('.pfx', '.cer')) {
-                    & $addCandidatePath (Join-Path -Path $directory -ChildPath ($baseName + $extension))
-                  }
-                }
-              }
-
-              foreach ($candidatePath in $candidatePaths) {
-                if (-not (Test-Path -LiteralPath $candidatePath)) { continue }
-
-                $extension = [System.IO.Path]::GetExtension($candidatePath)
-                if ($extension.Equals('.pfx', [System.StringComparison]::OrdinalIgnoreCase)) {
-                  if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
-                    try {
-                      $cert = Get-SecureStoreCertificateForDecryption -CertificatePath $candidatePath -Password $CertificatePassword
-                      break
-                    }
-                    catch {
-                      [void]$certificateErrors.Add("$($candidatePath): $($_.Exception.Message)")
-                    }
-                  }
-                  else {
-                    [void]$certificateErrors.Add("Certificate '$candidatePath' requires -CertificatePassword to unlock the private key.")
-                  }
-                }
-                elseif ($extension.Equals('.cer', [System.StringComparison]::OrdinalIgnoreCase)) {
-                  [void]$certificateErrors.Add("Certificate '$candidatePath' contains only the public key. Provide the matching PFX to decrypt the secret.")
-                }
-              }
-            }
-          }
-
-          if (-not $cert) {
-            $messageParts = @()
-            if ($thumbFromMetadata) { $messageParts += "thumbprint $thumbFromMetadata" }
-            if ($certFileName) { $messageParts += "certificate file '$certFileName'" }
-            $context = if ($messageParts.Count -gt 0) { $messageParts -join ' or ' } else { 'stored metadata' }
-            $details = if ($certificateErrors.Count -gt 0) { ': ' + ($certificateErrors -join '; ') } else { '.' }
-            throw [System.InvalidOperationException]::new("Unable to locate a certificate using $context$details")
-          }
-        }
-
-        if (-not $cert) {
-          throw [System.InvalidOperationException]::new('Unable to obtain a certificate for decryption.')
-        }
-
-        $hasHybridPayload = $false
-        if ($parsed -and $parsed.PSObject.Properties['Cipher']) {
-          $hasHybridPayload = $true
-        }
-
-        if ($hasHybridPayload) {
-          $plaintextBytes = Unprotect-SecureStoreSecretWithCertificate -Payload $encryptedPayload -Certificate $cert
-        }
-        else {
-          $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-          if (-not $privateKey) {
-            throw [System.InvalidOperationException]::new('The certificate does not have an RSA private key.')
-          }
-
-          $encryptedBytes = [Convert]::FromBase64String($parsed.EncryptedData)
-          $plaintextBytes = $privateKey.Decrypt($encryptedBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-        }
-
-        $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
-        try {
-          $securePassword = New-Object System.Security.SecureString
-          foreach ($char in $chars) { $securePassword.AppendChar($char) }
-          $securePassword.MakeReadOnly()
-        }
-        finally {
-          [Array]::Clear($chars, 0, $chars.Length)
-        }
-
-        if ($AsCredential.IsPresent) {
-          return New-Object System.Management.Automation.PSCredential($UserName, $securePassword.Copy())
-        }
-
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-        try {
-          return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        }
-        finally {
-          [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        elseif ($parsed.Version -is [int]) {
+          $secretVersion = [int]$parsed.Version
         }
       }
-      else {
-        # ===== AES‑based secret (version 2) =====
-        if (-not $keyFilePath) {
-          throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
-        }
-        if (-not (Test-Path -LiteralPath $keyFilePath)) {
-          throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
-        }
-        $encryptionKey = Read-SecureStoreByteArray -Path $keyFilePath
-        $encryptedPassword = $encryptedPayload
-        $plaintextBytes = Unprotect-SecureStoreSecret -Payload $encryptedPassword -MasterKey $encryptionKey
 
-        $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
-        try {
-          $securePassword = New-Object System.Security.SecureString
-          foreach ($char in $chars) { $securePassword.AppendChar($char) }
-          $securePassword.MakeReadOnly()
-        }
-        finally {
-          [Array]::Clear($chars, 0, $chars.Length)
-        }
+      switch ($secretVersion) {
+        3 {
+          if ($parsed.EncryptionMethod -ne 'Certificate') {
+            throw [System.InvalidOperationException]::new("Unsupported encryption method '$($parsed.EncryptionMethod)' for version 3 payloads.")
+          }
 
-        if ($AsCredential.IsPresent) {
-          return New-Object System.Management.Automation.PSCredential($UserName, $securePassword.Copy())
-        }
+          if (-not (Get-Command -Name 'Unprotect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue)) {
+            . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+          }
+          if (-not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue)) {
+            . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+          }
 
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-        try {
-          return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+          try {
+            if (-not $PSBoundParameters.ContainsKey('CertificateThumbprint') -and -not $PSBoundParameters.ContainsKey('CertificatePath')) {
+              if (-not ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['Thumbprint'])) {
+                throw [System.InvalidOperationException]::new('Secret metadata does not include a certificate thumbprint. Provide -CertificateThumbprint or -CertificatePath.')
+              }
+
+              $thumb = [string]$parsed.CertificateInfo.Thumbprint
+              if ([string]::IsNullOrWhiteSpace($thumb)) {
+                throw [System.InvalidOperationException]::new('Secret metadata includes an empty certificate thumbprint. Provide -CertificateThumbprint or -CertificatePath.')
+              }
+
+              $thumb = $thumb.Replace(' ', '')
+              $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumb -RequirePrivateKey
+            }
+            elseif ($PSBoundParameters.ContainsKey('CertificatePath')) {
+              $parameters = @{ CertificatePath = $CertificatePath; RequirePrivateKey = $true }
+              if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+                $parameters['Password'] = $CertificatePassword
+              }
+              $cert = Get-SecureStoreCertificateForEncryption @parameters
+            }
+            else {
+              $thumb = $CertificateThumbprint.Replace(' ', '')
+              $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumb -RequirePrivateKey
+            }
+          }
+          catch {
+            throw [System.InvalidOperationException]::new(
+              "Failed to load certificate for decryption: $($_.Exception.Message)",
+              $_.Exception
+            )
+          }
+
+          if (-not $cert) {
+            throw [System.InvalidOperationException]::new('Unable to obtain a certificate for decryption.')
+          }
+
+          $hasHybridPayload = $false
+          if ($parsed -and $parsed.PSObject.Properties['Cipher']) {
+            $hasHybridPayload = $true
+          }
+
+          if ($hasHybridPayload) {
+            $plaintextBytes = Unprotect-SecureStoreSecretWithCertificate -Payload $encryptedPayload -Certificate $cert
+          }
+          else {
+            $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+            if (-not $privateKey) {
+              throw [System.InvalidOperationException]::new('The certificate does not have an RSA private key.')
+            }
+
+            $encryptedBytes = [Convert]::FromBase64String($parsed.EncryptedData)
+            $plaintextBytes = $privateKey.Decrypt($encryptedBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+          }
+
+          $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
+          try {
+            $securePassword = New-Object System.Security.SecureString
+            foreach ($char in $chars) { $securePassword.AppendChar($char) }
+            $securePassword.MakeReadOnly()
+          }
+          finally {
+            [Array]::Clear($chars, 0, $chars.Length)
+          }
+
+          if ($AsCredential.IsPresent) {
+            return New-Object System.Management.Automation.PSCredential($UserName, $securePassword.Copy())
+          }
+
+          $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+          try {
+            return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+          }
+          finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+          }
         }
-        finally {
-          [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        default {
+          if (-not $keyFilePath) {
+            throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
+          }
+          if (-not (Test-Path -LiteralPath $keyFilePath)) {
+            throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
+          }
+          $encryptionKey = Read-SecureStoreByteArray -Path $keyFilePath
+          $encryptedPassword = $encryptedPayload
+          $plaintextBytes = Unprotect-SecureStoreSecret -Payload $encryptedPassword -MasterKey $encryptionKey
+
+          $chars = [System.Text.Encoding]::UTF8.GetChars($plaintextBytes)
+          try {
+            $securePassword = New-Object System.Security.SecureString
+            foreach ($char in $chars) { $securePassword.AppendChar($char) }
+            $securePassword.MakeReadOnly()
+          }
+          finally {
+            [Array]::Clear($chars, 0, $chars.Length)
+          }
+
+          if ($AsCredential.IsPresent) {
+            return New-Object System.Management.Automation.PSCredential($UserName, $securePassword.Copy())
+          }
+
+          $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+          try {
+            return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+          }
+          finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+          }
         }
       }
     }
