@@ -60,17 +60,11 @@ function New-SecureStoreSecret {
   [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'ByKey')]
   param(
     [Parameter(ParameterSetName = 'ByKey', Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$KeyName,
-
-    [Parameter(ParameterSetName = 'ByKey', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'ByCertThumbprint', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'ByCertPath', Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$SecretFileName,
 
-    [Parameter(ParameterSetName = 'ByKey', Mandatory = $true)]
-    [Parameter(ParameterSetName = 'ByCertThumbprint', Mandatory = $true)]
-    [Parameter(ParameterSetName = 'ByCertPath', Mandatory = $true)]
-    [ValidateNotNull()]
     [object]$Password,
 
     [Parameter()]

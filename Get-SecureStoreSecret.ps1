@@ -109,6 +109,8 @@ function Get-SecureStoreSecret {
     $encryptionKey = $null
     $plaintextBytes = $null
     $securePassword = $null
+    $privateKey = $null
+    $cert = $null
     try {
       # Resolve candidate secret files (supporting legacy paths)
       $secretCandidates = New-Object System.Collections.Generic.List[string]
