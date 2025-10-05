@@ -303,8 +303,12 @@ function Protect-SecureStoreSecretWithCertificate {
 
   try {
     # Validate certificate has RSA public key
-    $rsa = $Certificate.PublicKey.Key
+    $rsaFromExtension = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($Certificate)
+    $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PublicKey.Key }
     if ($rsa -isnot [System.Security.Cryptography.RSA]) {
+      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
+        $rsaFromExtension.Dispose()
+      }
       throw "Certificate must use RSA algorithm for encryption"
     }
 
@@ -431,7 +435,19 @@ function Protect-SecureStoreSecretWithCertificate {
     }
 
     # Encrypt the AES key with RSA (certificate's public key)
-    $encryptedKey = $rsa.Encrypt($aesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    $rsaPadding = 'OaepSHA256'
+    try {
+      $encryptedKey = $rsa.Encrypt($aesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    }
+    catch {
+      $encryptedKey = $rsa.Encrypt($aesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
+      $rsaPadding = 'OaepSHA1'
+    }
+    finally {
+      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
+        $rsaFromExtension.Dispose()
+      }
+    }
 
     # Build JSON payload
     $cipherPayload = [ordered]@{
@@ -454,6 +470,7 @@ function Protect-SecureStoreSecretWithCertificate {
     $payload = [ordered]@{
       Version          = 3
       EncryptionMethod = 'Certificate'
+      CertificatePadding = $rsaPadding
       CertificateInfo  = [ordered]@{
         Thumbprint = $Certificate.Thumbprint
         Subject    = $Certificate.Subject
@@ -529,21 +546,42 @@ function Unprotect-SecureStoreSecretWithCertificate {
     }
 
     # Get RSA private key
-    $rsa = $null
-    if ($PSVersionTable.PSVersion.Major -ge 7) {
-      $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
-    }
-    else {
-      $rsa = $Certificate.PrivateKey
-    }
+    $rsaFromExtension = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PrivateKey }
 
-    if (-not $rsa) {
+    if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
+      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
+        $rsaFromExtension.Dispose()
+      }
       throw "Failed to retrieve RSA private key from certificate"
     }
 
-    # Decrypt the AES key using RSA private key
-    $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
-    $aesKey = $rsa.Decrypt($encryptedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    try {
+      # Decrypt the AES key using RSA private key
+      $encryptedKey = [Convert]::FromBase64String([string]$data.Cipher.EncryptedKey)
+      $preferredPadding = switch ($data.CertificatePadding) {
+        'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
+        'OaepSHA256' { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
+        default      { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
+      }
+
+      try {
+        $aesKey = $rsa.Decrypt($encryptedKey, $preferredPadding)
+      }
+      catch {
+        if ($preferredPadding -ne [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1) {
+          $aesKey = $rsa.Decrypt($encryptedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
+        }
+        else {
+          throw
+        }
+      }
+    }
+    finally {
+      if ($rsaFromExtension -and ($rsaFromExtension -is [System.IDisposable])) {
+        $rsaFromExtension.Dispose()
+      }
+    }
 
     # Decrypt the secret using AES
     $cipherAlgorithm = [string]$data.Cipher.Algorithm
