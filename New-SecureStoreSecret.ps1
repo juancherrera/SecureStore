@@ -148,7 +148,15 @@ function New-SecureStoreSecret {
         # Encrypt plaintext with AES and write JSON payload
         try {
           $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
-          $payloadJson = Protect-SecureStoreSecret -Plaintext $plaintextBytes -MasterKey $encryptionKey
+          try {
+            $payloadJson = Protect-SecureStoreSecret -Plaintext $plaintextBytes -MasterKey $encryptionKey
+          }
+          catch {
+            throw [System.InvalidOperationException]::new(
+              "Failed to create or update secret '$SecretFileName': $($_.Exception.Message)",
+              $_.Exception
+            )
+          }
           $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
           try {
             Write-SecureStoreFile -Path $secretFilePath -Bytes $payloadBytes
