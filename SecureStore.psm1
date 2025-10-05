@@ -89,6 +89,88 @@ if (-not $script:AesGcmType) {
 }
 
 $script:SupportsAesGcm = $null -ne $script:AesGcmType
+$script:SecureStoreCertificateCache = [System.Collections.Concurrent.ConcurrentDictionary[string, byte[]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:SecureStoreFallbackCertRoot = Join-Path -Path $script:DefaultSecureStorePath -ChildPath 'certstore'
+
+function Initialize-SecureStoreCertificateStore {
+  [CmdletBinding()]
+  param()
+
+  if (Get-PSDrive -Name 'Cert' -ErrorAction SilentlyContinue) {
+    return
+  }
+
+  $currentUserMy = Join-Path -Path $script:SecureStoreFallbackCertRoot -ChildPath 'CurrentUser/My'
+  [System.IO.Directory]::CreateDirectory($currentUserMy) | Out-Null
+
+  try {
+    New-PSDrive -Name 'Cert' -PSProvider FileSystem -Root $script:SecureStoreFallbackCertRoot -Scope Global -ErrorAction Stop | Out-Null
+  }
+  catch {
+    Write-Verbose "Failed to initialise fallback Cert: drive: $($_.Exception.Message)"
+  }
+}
+
+function Set-SecureStoreCachedCertificate {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$Thumbprint,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNull()]
+    [byte[]]$PfxBytes
+  )
+
+  $copy = New-Object byte[] $PfxBytes.Length
+  [System.Buffer]::BlockCopy($PfxBytes, 0, $copy, 0, $PfxBytes.Length)
+  $script:SecureStoreCertificateCache[$Thumbprint] = $copy
+}
+
+function Remove-SecureStoreCachedCertificate {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$Thumbprint
+  )
+
+  $removed = $null
+  if ($script:SecureStoreCertificateCache.TryRemove($Thumbprint, [ref]$removed)) {
+    if ($removed) {
+      [Array]::Clear($removed, 0, $removed.Length)
+    }
+  }
+}
+
+function Get-SecureStoreCachedCertificate {
+  [CmdletBinding()]
+  [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$Thumbprint
+  )
+
+  $cachedBytes = $null
+  if (-not $script:SecureStoreCertificateCache.TryGetValue($Thumbprint, [ref]$cachedBytes)) {
+    return $null
+  }
+
+  $copy = New-Object byte[] $cachedBytes.Length
+  [System.Buffer]::BlockCopy($cachedBytes, 0, $copy, 0, $cachedBytes.Length)
+  try {
+    return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+      $copy,
+      [string]::Empty,
+      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+    )
+  }
+  finally {
+    [Array]::Clear($copy, 0, $copy.Length)
+  }
+}
 
 function Test-SecureStorePathLike {
   [CmdletBinding()]

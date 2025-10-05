@@ -72,14 +72,52 @@ function Get-SecureStoreCertificateForEncryption {
     switch ($PSCmdlet.ParameterSetName) {
       'ByThumbprint' {
         Write-Verbose "Loading certificate by thumbprint: $Thumbprint"
-                
+
         # Search in CurrentUser\My first, then LocalMachine\My
-        $certificate = Get-Item "Cert:\CurrentUser\My\$Thumbprint" -ErrorAction SilentlyContinue
-                
-        if (-not $certificate) {
-          $certificate = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -ErrorAction SilentlyContinue
+        $candidate = Get-Item "Cert:\CurrentUser\My\$Thumbprint" -ErrorAction SilentlyContinue
+
+        $certificate = $null
+        if ($candidate) {
+          if ($candidate -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
+            $certificate = $candidate
+          }
+          elseif ($candidate -is [System.IO.FileInfo]) {
+            try {
+              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $candidate.FullName,
+                [string]::Empty,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              )
+            }
+            catch {
+              Write-Verbose "Failed to load fallback certificate file for thumbprint '$Thumbprint': $($_.Exception.Message)"
+            }
+          }
         }
-                
+
+        if (-not $certificate) {
+          $candidate = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -ErrorAction SilentlyContinue
+          if ($candidate -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
+            $certificate = $candidate
+          }
+          elseif ($candidate -is [System.IO.FileInfo]) {
+            try {
+              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $candidate.FullName,
+                [string]::Empty,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              )
+            }
+            catch {
+              Write-Verbose "Failed to load fallback LocalMachine certificate file for thumbprint '$Thumbprint': $($_.Exception.Message)"
+            }
+          }
+        }
+
+        if (-not $certificate) {
+          $certificate = Get-SecureStoreCachedCertificate -Thumbprint $Thumbprint
+        }
+
         if (-not $certificate) {
           throw "Certificate with thumbprint '$Thumbprint' not found in CurrentUser\My or LocalMachine\My"
         }
@@ -89,17 +127,49 @@ function Get-SecureStoreCertificateForEncryption {
         Write-Verbose "Loading certificate by subject: $Subject"
                 
         # Search in CurrentUser\My first
-        $certificate = Get-ChildItem Cert:\CurrentUser\My | 
-        Where-Object { $_.Subject -like "*$Subject*" -or $_.FriendlyName -eq $Subject } | 
+        $certificate = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
+        Where-Object {
+          ($_.Subject -like "*$Subject*") -or ($_.FriendlyName -eq $Subject)
+        } |
         Select-Object -First 1
-                
+
+        if ($certificate -is [System.IO.FileInfo]) {
+          try {
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $certificate.FullName,
+              [string]::Empty,
+              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+            )
+          }
+          catch {
+            Write-Verbose "Failed to load fallback certificate file when searching by subject '$Subject': $($_.Exception.Message)"
+            $certificate = $null
+          }
+        }
+
         if (-not $certificate) {
           # Search in LocalMachine\My
-          $certificate = Get-ChildItem Cert:\LocalMachine\My | 
-          Where-Object { $_.Subject -like "*$Subject*" -or $_.FriendlyName -eq $Subject } | 
+          $certificate = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+          Where-Object {
+            ($_.Subject -like "*$Subject*") -or ($_.FriendlyName -eq $Subject)
+          } |
           Select-Object -First 1
+
+          if ($certificate -is [System.IO.FileInfo]) {
+            try {
+              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $certificate.FullName,
+                [string]::Empty,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              )
+            }
+            catch {
+              Write-Verbose "Failed to load fallback LocalMachine certificate file when searching by subject '$Subject': $($_.Exception.Message)"
+              $certificate = $null
+            }
+          }
         }
-                
+
         if (-not $certificate) {
           throw "Certificate with subject or friendly name matching '$Subject' not found"
         }
@@ -412,7 +482,11 @@ function Protect-SecureStoreSecretWithCertificate {
     return ($payload | ConvertTo-Json -Depth 4)
   }
   catch {
-    throw [System.InvalidOperationException]::new('Failed to encrypt secret with certificate.', $_.Exception)
+    $errorMessage = $_.Exception.Message
+    throw [System.InvalidOperationException]::new(
+      "Failed to encrypt secret with certificate: $errorMessage",
+      $_.Exception
+    )
   }
 }
 

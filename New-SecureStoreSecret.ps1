@@ -220,7 +220,6 @@ function New-SecureStoreSecret {
         }
         finally {
           if ($plaintextBytes) { [Array]::Clear($plaintextBytes, 0, $plaintextBytes.Length) }
-          if ($cert) { $cert.Dispose() }
         }
       }
     }

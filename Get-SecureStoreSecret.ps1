@@ -62,7 +62,7 @@ function Get-SecureStoreSecret {
   [OutputType([string])]
   [OutputType([System.Management.Automation.PSCredential])]
   param(
-    [Parameter(ParameterSetName = 'ByName', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'ByName')]
     [ValidateNotNullOrEmpty()]
     [string]$KeyName,
 
@@ -107,6 +107,7 @@ function Get-SecureStoreSecret {
 
   process {
     $encryptionKey = $null
+    $keyFilePath = $null
     $plaintextBytes = $null
     $securePassword = $null
     $privateKey = $null
@@ -143,12 +144,14 @@ function Get-SecureStoreSecret {
         default {
           $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
 
-          if (Test-SecureStorePathLike -Value $KeyName) {
-            $keyFilePath = Resolve-SecureStorePath -Path $KeyName -BasePath $paths.BasePath
-          }
-          else {
-            $keyChild = if ($KeyName.EndsWith('.bin', [System.StringComparison]::OrdinalIgnoreCase)) { $KeyName } else { "$KeyName.bin" }
-            $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath $keyChild
+          if ($PSBoundParameters.ContainsKey('KeyName') -and -not [string]::IsNullOrWhiteSpace($KeyName)) {
+            if (Test-SecureStorePathLike -Value $KeyName) {
+              $keyFilePath = Resolve-SecureStorePath -Path $KeyName -BasePath $paths.BasePath
+            }
+            else {
+              $keyChild = if ($KeyName.EndsWith('.bin', [System.StringComparison]::OrdinalIgnoreCase)) { $KeyName } else { "$KeyName.bin" }
+              $keyFilePath = Join-Path -Path $paths.BinPath -ChildPath $keyChild
+            }
           }
 
           if (Test-SecureStorePathLike -Value $SecretFileName) {
@@ -176,13 +179,6 @@ function Get-SecureStoreSecret {
         }
       }
 
-      # AES‑based secrets require the key file; certificate secrets do not
-      if (-not $CertificateThumbprint -and -not $CertificatePath) {
-        if (-not (Test-Path -LiteralPath $keyFilePath)) {
-          throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
-        }
-      }
-
       # Identify the first existing secret file
       $secretFilePath = $null
       foreach ($candidate in $secretCandidates) {
@@ -193,7 +189,7 @@ function Get-SecureStoreSecret {
       }
       if (-not $secretFilePath) {
         $fallbackTarget = if ($secretCandidates.Count -gt 0) { $secretCandidates[0] } else { $SecretFileName }
-        throw [System.IO.FileNotFoundException]::new('The secret file could not be located.', $fallbackTarget)
+        throw [System.IO.FileNotFoundException]::new('The encrypted payload file could not be located.', $fallbackTarget)
       }
 
       # Read encrypted payload text
@@ -218,68 +214,25 @@ function Get-SecureStoreSecret {
         }
         $cert = $null
         $privateKey = $null
+        if (-not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue)) {
+          . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
+        }
+
         if ($CertificatePath) {
-          $certPw = $CertificatePassword
-          if ($certPw -is [System.Security.SecureString]) {
-            $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($certPw)
-            try {
-              $certPw = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-            }
-            finally {
-              [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-            }
-          }
-          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $CertificatePath,
-            $certPw,
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet
-          )
+          $cert = Get-SecureStoreCertificateForEncryption -CertificatePath $CertificatePath -Password $CertificatePassword -RequirePrivateKey
         }
         elseif ($CertificateThumbprint) {
-          $thumbUpper = $CertificateThumbprint.Replace(' ', '').ToUpperInvariant()
-          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'CurrentUser'
-          $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-          try {
-            $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-          }
-          finally {
-            $store.Close()
-          }
-          if (-not $cert) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'LocalMachine'
-            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-            try {
-              $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-            }
-            finally {
-              $store.Close()
-            }
-          }
+          $trimmedThumb = $CertificateThumbprint.Replace(' ', '')
+          $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $trimmedThumb -RequirePrivateKey
         }
         else {
           # Auto‑detect using thumbprint from metadata
-          $thumbUpper = ($parsed.CertificateInfo.Thumbprint).Replace(' ', '').ToUpperInvariant()
-          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'CurrentUser'
-          $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-          try {
-            $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-          }
-          finally {
-            $store.Close()
-          }
-          if (-not $cert) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'LocalMachine'
-            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-            try {
-              $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-            }
-            finally {
-              $store.Close()
-            }
-          }
-          if (-not $cert) {
-            throw [System.Security.Cryptography.CryptographicException]::new("Could not locate certificate with thumbprint $thumbUpper.")
-          }
+          $thumbFromMetadata = ($parsed.CertificateInfo.Thumbprint).Replace(' ', '')
+          $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumbFromMetadata -RequirePrivateKey
+        }
+
+        if (-not $cert) {
+          throw [System.Security.Cryptography.CryptographicException]::new('Could not locate a certificate capable of decrypting this secret.')
         }
 
         $hasHybridPayload = $false
@@ -324,6 +277,12 @@ function Get-SecureStoreSecret {
       }
       else {
         # ===== AES‑based secret (version 2) =====
+        if (-not $keyFilePath) {
+          throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
+        }
+        if (-not (Test-Path -LiteralPath $keyFilePath)) {
+          throw [System.IO.FileNotFoundException]::new('The encryption key file could not be located.', $keyFilePath)
+        }
         $encryptionKey = Read-SecureStoreByteArray -Path $keyFilePath
         $encryptedPassword = $encryptedPayload
         $plaintextBytes = Unprotect-SecureStoreSecret -Payload $encryptedPassword -MasterKey $encryptionKey
@@ -352,7 +311,11 @@ function Get-SecureStoreSecret {
       }
     }
     catch {
-      throw [System.InvalidOperationException]::new('Failed to retrieve the requested secret.', $_.Exception)
+      $errorMessage = $_.Exception.Message
+      throw [System.InvalidOperationException]::new(
+        "Failed to retrieve the requested entry: $errorMessage",
+        $_.Exception
+      )
     }
     finally {
       if ($securePassword) { $securePassword.Dispose() }
