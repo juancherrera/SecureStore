@@ -271,6 +271,7 @@ function New-SecureStoreCertificate {
     $certificate = $null
     $pfxPath = $null
     $pemPath = $null
+    $cerPath = $null
     $selfSignedCommand = Get-Command -Name 'New-SelfSignedCertificate' -ErrorAction SilentlyContinue
 
     try {
@@ -285,6 +286,7 @@ function New-SecureStoreCertificate {
         $paths = Sync-SecureStoreWorkingDirectory -BasePath $FolderPath
         $pfxPath = [string](Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pfx"))
         $pemPath = [string](Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.pem"))
+        $cerPath = [string](Join-Path -Path $paths.CertsPath -ChildPath ("$CertificateName.cer"))
         if (-not $PSCmdlet.ShouldProcess($pfxPath, "Create certificate '$CertificateName'")) {
           return
         }
@@ -416,6 +418,9 @@ function New-SecureStoreCertificate {
         if (Test-Path -LiteralPath $pfxPath) {
           Remove-Item -LiteralPath $pfxPath -Force
         }
+        if ($cerPath -and (Test-Path -LiteralPath $cerPath)) {
+          Remove-Item -LiteralPath $cerPath -Force
+        }
         $pfxBytes = $null
         $plainPassword = $null
         $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
@@ -428,6 +433,18 @@ function New-SecureStoreCertificate {
           finally {
             if ($pfxBytes) {
               [Array]::Clear($pfxBytes, 0, $pfxBytes.Length)
+            }
+          }
+
+          if ($cerPath) {
+            $publicCertBytes = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            try {
+              Write-SecureStoreFile -Path $cerPath -Bytes $publicCertBytes
+            }
+            finally {
+              if ($publicCertBytes) {
+                [Array]::Clear($publicCertBytes, 0, $publicCertBytes.Length)
+              }
             }
           }
 
@@ -501,15 +518,7 @@ function New-SecureStoreCertificate {
           }
         }
 
-        # Remove the certificate from the store after exporting when using the Windows cmdlet workflow.
-        if ($selfSignedCommand) {
-          try {
-            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
-          }
-          catch {
-            Write-Verbose "Failed to remove certificate '$($certificate.Thumbprint)' from store: $($_.Exception.Message)"
-          }
-        }
+        Write-Verbose "Certificate '$CertificateName' retained in Cert:\CurrentUser\My\$($certificate.Thumbprint) for reuse."
       }
 
       # Return result object.
@@ -525,6 +534,7 @@ function New-SecureStoreCertificate {
         Paths           = if (-not $StoreOnly) {
           [PSCustomObject]@{
             Pfx = $pfxPath
+            Cer = $cerPath
             Pem = if ($ExportPem) { $pemPath } else { $null }
           }
         }

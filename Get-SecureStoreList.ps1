@@ -101,6 +101,15 @@ function Get-SecureStoreList {
             }
             catch {
               Write-Verbose "Failed to load PFX certificate '$($file.FullName)': $($_.Exception.Message)"
+              $cerPath = [System.IO.Path]::ChangeExtension($file.FullName, '.cer')
+              if (Test-Path -LiteralPath $cerPath) {
+                try {
+                  $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerPath)
+                }
+                catch {
+                  Write-Verbose "Failed to load companion CER certificate '$cerPath': $($_.Exception.Message)"
+                }
+              }
             }
           }
           default { }

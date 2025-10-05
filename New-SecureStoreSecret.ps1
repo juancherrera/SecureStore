@@ -186,58 +186,30 @@ function New-SecureStoreSecret {
         }
 
         # Ensure certificate helper functions are available
-        if (-not (Get-Command -Name 'Protect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Command -Name 'Protect-SecureStoreSecretWithCertificate' -ErrorAction SilentlyContinue) -or
+            -not (Get-Command -Name 'Get-SecureStoreCertificateForEncryption' -ErrorAction SilentlyContinue)) {
           . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
         }
 
         # Acquire certificate (from thumbprint or PFX)
-        $cert = $null
-        if ($PSCmdlet.ParameterSetName -eq 'ByCertPath') {
-          $certPw = $CertificatePassword
-          if ($certPw -is [System.Security.SecureString]) {
-            $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($certPw)
-            try {
-              $certPw = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-            }
-            finally {
-              [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-            }
-          }
-          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $CertificatePath,
-            $certPw,
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet
-          )
+        $cert = if ($PSCmdlet.ParameterSetName -eq 'ByCertPath') {
+          Get-SecureStoreCertificateForEncryption -CertificatePath $CertificatePath -Password $CertificatePassword
         }
         else {
-          # Search in CurrentUser and LocalMachine stores
-          $thumbUpper = $CertificateThumbprint.Replace(' ', '').ToUpperInvariant()
-          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'CurrentUser'
-          $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-          try {
-            $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-          }
-          finally {
-            $store.Close()
-          }
-          if (-not $cert) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'My', 'LocalMachine'
-            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-            try {
-              $cert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbUpper } | Select-Object -First 1
-            }
-            finally {
-              $store.Close()
-            }
-          }
-          if (-not $cert) {
-            throw [System.IO.FileNotFoundException]::new("Could not locate certificate with thumbprint $CertificateThumbprint.")
-          }
+          Get-SecureStoreCertificateForEncryption -Thumbprint $CertificateThumbprint
         }
 
         try {
           $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
-          $payloadJson = Protect-SecureStoreSecretWithCertificate -Plaintext $plaintextBytes -Certificate $cert
+          try {
+            $payloadJson = Protect-SecureStoreSecretWithCertificate -Plaintext $plaintextBytes -Certificate $cert
+          }
+          catch {
+            throw [System.InvalidOperationException]::new(
+              "Failed to create or update secret '$SecretFileName': $($_.Exception.Message)",
+              $_.Exception
+            )
+          }
           $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
           try {
             Write-SecureStoreFile -Path $secretFilePath -Bytes $payloadBytes
@@ -253,7 +225,13 @@ function New-SecureStoreSecret {
       }
     }
     catch {
-      throw [System.InvalidOperationException]::new("Failed to create or update secret '$SecretFileName'.", $_.Exception)
+      if ($_.Exception -is [System.InvalidOperationException]) {
+        throw
+      }
+      throw [System.InvalidOperationException]::new(
+        "Failed to create or update secret '$SecretFileName': $($_.Exception.Message)",
+        $_.Exception
+      )
     }
     finally {
       if ($securePassword) {
