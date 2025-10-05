@@ -95,6 +95,14 @@ function Get-SecureStoreList {
           '.cer' { $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName) }
           '.crt' { $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName) }
           '.der' { $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName) }
+          '.pfx' {
+            try {
+              $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($file.FullName)
+            }
+            catch {
+              Write-Verbose "Failed to load PFX certificate '$($file.FullName)': $($_.Exception.Message)"
+            }
+          }
           default { }
         }
 
