@@ -343,7 +343,7 @@ function New-SecureStoreCertificate {
         CertStoreLocation = 'Cert:\CurrentUser\My'
         NotAfter          = (Get-Date).AddYears($ValidityYears)
         KeyExportPolicy   = 'Exportable'
-        KeySpec           = 'Signature'
+        KeySpec           = 'KeyExchange'
         HashAlgorithm     = 'SHA256'
         FriendlyName      = $CertificateName
       }
@@ -428,6 +428,7 @@ function New-SecureStoreCertificate {
             $storePfxBytes,
             $storePlainPassword,
             [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
             [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
           )
           try {

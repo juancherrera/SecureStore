@@ -233,6 +233,20 @@ function Get-SecureStoreSecret {
             . "$PSScriptRoot/Get-SecureStoreCertificateForEncryption.ps1"
           }
 
+          $expectedThumbprint = $null
+          if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['Thumbprint']) {
+            $expectedThumbprint = [string]$parsed.CertificateInfo.Thumbprint
+            if (-not [string]::IsNullOrWhiteSpace($expectedThumbprint)) {
+              $expectedThumbprint = $expectedThumbprint.Replace(' ', '')
+            }
+            else {
+              $expectedThumbprint = $null
+            }
+          }
+
+          $requestedThumbprint = $null
+          $certificateLoadError = $null
+
           try {
             if (-not $PSBoundParameters.ContainsKey('CertificateThumbprint') -and -not $PSBoundParameters.ContainsKey('CertificatePath')) {
               if (-not ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['Thumbprint'])) {
@@ -245,6 +259,7 @@ function Get-SecureStoreSecret {
               }
 
               $thumb = $thumb.Replace(' ', '')
+              $requestedThumbprint = $thumb
               $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumb -RequirePrivateKey
             }
             elseif ($PSBoundParameters.ContainsKey('CertificatePath')) {
@@ -256,13 +271,147 @@ function Get-SecureStoreSecret {
             }
             else {
               $thumb = $CertificateThumbprint.Replace(' ', '')
+              $requestedThumbprint = $thumb
               $cert = Get-SecureStoreCertificateForEncryption -Thumbprint $thumb -RequirePrivateKey
             }
           }
           catch {
+            $certificateLoadError = $_
+          }
+
+          if (-not $cert -and $certificateLoadError) {
+            $targetThumbprint = if ($expectedThumbprint) { $expectedThumbprint } elseif ($requestedThumbprint) { $requestedThumbprint } else { $null }
+            $fallbackCertificate = $null
+
+            if (-not $PSBoundParameters.ContainsKey('CertificatePath')) {
+              $candidateDirectories = New-Object System.Collections.Generic.List[string]
+              $directorySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+              $addDirectory = {
+                param([string]$Directory)
+                if ([string]::IsNullOrWhiteSpace($Directory)) { return }
+                try {
+                  $fullPath = [System.IO.Path]::GetFullPath($Directory)
+                }
+                catch {
+                  return
+                }
+                if ($directorySet.Add($fullPath)) {
+                  [void]$candidateDirectories.Add($fullPath)
+                }
+              }
+
+              if ($paths -and $paths.PSObject.Properties['CertsPath']) {
+                & $addDirectory $paths.CertsPath
+              }
+
+              if ($secretFilePath) {
+                $secretDir = Split-Path -Path $secretFilePath -Parent
+                if ($secretDir) {
+                  $baseDir = Split-Path -Path $secretDir -Parent
+                  if ($baseDir) {
+                    & $addDirectory (Join-Path -Path $baseDir -ChildPath 'certs')
+                  }
+                }
+              }
+
+              $candidateFiles = New-Object System.Collections.Generic.List[string]
+              $fileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+              $addFile = {
+                param([string]$FilePath)
+                if ([string]::IsNullOrWhiteSpace($FilePath)) { return }
+                try {
+                  $fullFilePath = [System.IO.Path]::GetFullPath($FilePath)
+                }
+                catch {
+                  return
+                }
+                if ($fileSet.Add($fullFilePath)) {
+                  [void]$candidateFiles.Add($fullFilePath)
+                }
+              }
+
+              if ($parsed.CertificateInfo -and $parsed.CertificateInfo.PSObject.Properties['FileName']) {
+                $fileName = [string]$parsed.CertificateInfo.FileName
+                if (-not [string]::IsNullOrWhiteSpace($fileName)) {
+                  foreach ($directory in $candidateDirectories) {
+                    $explicitCandidate = Join-Path -Path $directory -ChildPath $fileName
+                    if (Test-Path -LiteralPath $explicitCandidate) {
+                      & $addFile $explicitCandidate
+                    }
+                  }
+                }
+              }
+
+              foreach ($directory in $candidateDirectories) {
+                if (-not (Test-Path -LiteralPath $directory)) { continue }
+                $pfxFiles = Get-ChildItem -LiteralPath $directory -Filter '*.pfx' -File -ErrorAction SilentlyContinue
+                foreach ($file in $pfxFiles) {
+                  & $addFile $file.FullName
+                }
+              }
+
+              if ($candidateFiles.Count -gt 0) {
+                $passwordCandidates = New-Object 'System.Collections.Generic.List[object]'
+                $createdEmptyPassword = $false
+
+                if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+                  [void]$passwordCandidates.Add($CertificatePassword)
+                }
+                else {
+                  $emptyPassword = New-Object System.Security.SecureString
+                  $emptyPassword.MakeReadOnly()
+                  [void]$passwordCandidates.Add($emptyPassword)
+                  $createdEmptyPassword = $true
+                }
+
+                foreach ($pfxPath in $candidateFiles) {
+                  foreach ($passwordCandidate in $passwordCandidates) {
+                    $loadParams = @{ CertificatePath = $pfxPath; RequirePrivateKey = $true; Password = $passwordCandidate }
+                    $candidate = $null
+                    try {
+                      $candidate = Get-SecureStoreCertificateForEncryption @loadParams
+                    }
+                    catch {
+                      $candidate = $null
+                    }
+
+                    if ($candidate) {
+                      $candidateThumbprint = $candidate.Thumbprint
+                      if (-not $targetThumbprint -or $candidateThumbprint -eq $targetThumbprint) {
+                        $fallbackCertificate = $candidate
+                        break
+                      }
+
+                      if ($candidate -is [System.IDisposable]) {
+                        $candidate.Dispose()
+                      }
+                    }
+                  }
+
+                  if ($fallbackCertificate) {
+                    break
+                  }
+                }
+
+                if ($createdEmptyPassword -and $passwordCandidates.Count -gt 0) {
+                  $firstPassword = $passwordCandidates[0]
+                  if ($firstPassword -is [System.IDisposable]) {
+                    $firstPassword.Dispose()
+                  }
+                }
+              }
+            }
+
+            if ($fallbackCertificate) {
+              $cert = $fallbackCertificate
+              $certificateLoadError = $null
+            }
+          }
+
+          if ($certificateLoadError) {
             throw [System.InvalidOperationException]::new(
-              "Failed to load certificate for decryption: $($_.Exception.Message)",
-              $_.Exception
+              "Failed to load certificate for decryption: $($certificateLoadError.Exception.Message)",
+              $certificateLoadError.Exception
             )
           }
 

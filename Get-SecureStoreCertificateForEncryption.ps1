@@ -66,6 +66,9 @@ function Get-SecureStoreCertificateForEncryption {
   )
 
   $certificate = $null
+  $storageFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor
+    [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
+    [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
 
   try {
     # Route to the correct loading path based on how the caller identified the certificate.
@@ -86,7 +89,7 @@ function Get-SecureStoreCertificateForEncryption {
               $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $candidate.FullName,
                 [string]::Empty,
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+                $storageFlags
               )
             }
             catch {
@@ -105,7 +108,7 @@ function Get-SecureStoreCertificateForEncryption {
               $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $candidate.FullName,
                 [string]::Empty,
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+                $storageFlags
               )
             }
             catch {
@@ -138,7 +141,7 @@ function Get-SecureStoreCertificateForEncryption {
             $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
               $certificate.FullName,
               [string]::Empty,
-              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              $storageFlags
             )
           }
           catch {
@@ -160,7 +163,7 @@ function Get-SecureStoreCertificateForEncryption {
               $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $certificate.FullName,
                 [string]::Empty,
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+                $storageFlags
               )
             }
             catch {
@@ -199,7 +202,7 @@ function Get-SecureStoreCertificateForEncryption {
               $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $CertificatePath,
                 $plainPassword,
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+                $storageFlags
               )
             }
             finally {
@@ -253,7 +256,55 @@ function Get-SecureStoreCertificateForEncryption {
 
     # Check if private key is required but missing
     if ($RequirePrivateKey -and -not $certificate.HasPrivateKey) {
-      throw "Certificate does not have a private key. Decryption requires a certificate with private key."
+      $resolvedThumbprint = $null
+      try {
+        $resolvedThumbprint = $certificate.Thumbprint
+      }
+      catch {
+        $resolvedThumbprint = $null
+      }
+
+      if (-not $resolvedThumbprint -and $Thumbprint) {
+        $resolvedThumbprint = $Thumbprint
+      }
+
+      $reimportedCertificate = $null
+      if ($resolvedThumbprint) {
+        try {
+          $reimportedCertificate = Get-SecureStoreCachedCertificate -Thumbprint $resolvedThumbprint
+        }
+        catch {
+          $reimportedCertificate = $null
+        }
+      }
+
+      if ($reimportedCertificate -and $reimportedCertificate.HasPrivateKey) {
+        if ($certificate -is [System.IDisposable]) {
+          $certificate.Dispose()
+        }
+        $certificate = $reimportedCertificate
+      }
+      else {
+        if ($reimportedCertificate -and ($reimportedCertificate -is [System.IDisposable])) {
+          $reimportedCertificate.Dispose()
+        }
+
+        $identifier = if ($resolvedThumbprint) {
+          "certificate with thumbprint '$resolvedThumbprint'"
+        }
+        elseif ($PSCmdlet.ParameterSetName -eq 'ByPath') {
+          "certificate file '$CertificatePath'"
+        }
+        elseif ($PSCmdlet.ParameterSetName -eq 'BySubject') {
+          "certificate matching '$Subject'"
+        }
+        else {
+          'specified certificate'
+        }
+
+        throw [System.InvalidOperationException]::new(
+          "The $identifier does not expose an accessible private key. Ensure the certificate's private key is installed in Cert:\\CurrentUser\\My or provide the associated PFX file and password.")
+      }
     }
 
     # Validate algorithm for encryption operations
@@ -583,16 +634,16 @@ function Unprotect-SecureStoreSecretWithCertificate {
     $data = $Payload | ConvertFrom-Json -ErrorAction Stop
 
     if ($data.Version -ne 3) {
-      throw "Unsupported secret version: $($data.Version). Expected version 3 for certificate-encrypted secrets."
+      throw [System.InvalidOperationException]::new("Unsupported secret version: $($data.Version). Expected version 3 for certificate-encrypted secrets.")
     }
 
     if ($data.EncryptionMethod -ne 'Certificate') {
-      throw "Invalid encryption method: $($data.EncryptionMethod). Expected 'Certificate'."
+      throw [System.InvalidOperationException]::new("Invalid encryption method: $($data.EncryptionMethod). Expected 'Certificate'.")
     }
 
     # Validate certificate has private key
     if (-not $Certificate.HasPrivateKey) {
-      throw "Certificate does not have a private key. Cannot decrypt secret."
+      throw [System.InvalidOperationException]::new('The provided certificate does not expose an accessible private key.')
     }
 
     $rsa = $null
@@ -606,7 +657,7 @@ function Unprotect-SecureStoreSecretWithCertificate {
       $rsa = if ($rsaFromExtension) { $rsaFromExtension } else { $Certificate.PrivateKey }
 
       if (-not $rsa -or $rsa -isnot [System.Security.Cryptography.RSA]) {
-        throw "Failed to retrieve RSA private key from certificate"
+        throw [System.InvalidOperationException]::new('Failed to retrieve RSA private key from certificate.')
       }
 
       # Decrypt the AES key using RSA private key
