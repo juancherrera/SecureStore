@@ -209,11 +209,42 @@ function New-SecureStoreSecret {
 
         try {
           $plaintextBytes = Get-SecureStorePlaintextData -SecureString $securePassword
-          $certificateMetadata = @{}
+          $certificateMetadata = [ordered]@{}
           if ($PSCmdlet.ParameterSetName -eq 'ByCertPath') {
+            $resolvedCertPath = $null
+            try {
+              $baseForResolution = if ($paths -and $paths.PSObject.Properties['BasePath']) { $paths.BasePath } elseif ($secretFilePath) { Split-Path -Path $secretFilePath -Parent } else { (Get-Location).Path }
+              $resolvedCertPath = Resolve-SecureStorePath -Path $CertificatePath -BasePath $baseForResolution
+            }
+            catch {
+              try {
+                $resolvedCertPath = [System.IO.Path]::GetFullPath($CertificatePath)
+              }
+              catch {
+                $resolvedCertPath = $CertificatePath
+              }
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($resolvedCertPath)) {
+              $certificateMetadata['Path'] = $resolvedCertPath
+            }
+
             $certFileName = [System.IO.Path]::GetFileName($CertificatePath)
             if (-not [string]::IsNullOrWhiteSpace($certFileName)) {
               $certificateMetadata['FileName'] = $certFileName
+            }
+
+            if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+              $hasPassword = $false
+              if ($CertificatePassword -is [System.Security.SecureString]) {
+                $hasPassword = ($CertificatePassword.Length -gt 0)
+              }
+              elseif ($CertificatePassword) {
+                $hasPassword = (-not [string]::IsNullOrWhiteSpace([string]$CertificatePassword))
+              }
+              if ($hasPassword) {
+                $certificateMetadata['PasswordProtected'] = $true
+              }
             }
           }
 
