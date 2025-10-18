@@ -44,7 +44,7 @@ Optional email subject alternative names.
 Optional URI subject alternative names.
 
 .PARAMETER EnhancedKeyUsage
-Optional EKU list to embed within the certificate.
+Optional EKU list to embed within the certificate. Defaults include both Server and Client Authentication.
 
 .PARAMETER ExportPem
 Switch to export a PEM copy alongside the PFX.
@@ -251,7 +251,7 @@ function New-SecureStoreCertificate {
     [string[]]$Uri,
 
     [Parameter()]
-    [string[]]$EnhancedKeyUsage = @('1.3.6.1.5.5.7.3.1'),
+    [string[]]$EnhancedKeyUsage = @('1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2'),
 
     [Parameter(ParameterSetName = 'Export')]
     [switch]$ExportPem,
