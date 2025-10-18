@@ -153,12 +153,11 @@ New-SecureStoreCertificate -CertificateName 'MyAppCert' -Password 'CertPass123' 
 $secure = Read-Host 'PFX password' -AsSecureString
 New-SecureStoreCertificate -CertificateName 'Api' -Password $secure -Algorithm ECDSA -CurveName nistP256 -ValidityYears 2 -ExportPem
 
-# Advanced RSA certificate with SAN and EKU
+# Advanced RSA certificate with SAN and EKU (Server + Client auth by default)
 New-SecureStoreCertificate -CertificateName 'WebServer' -Password 'Pass123' `
     -Algorithm RSA -KeyLength 4096 `
     -DnsName 'web.local', '*.web.local' `
     -IpAddress '10.0.1.100' `
-    -EnhancedKeyUsage '1.3.6.1.5.5.7.3.1' `
     -ValidityYears 5 `
     -ExportPem
 
@@ -167,6 +166,8 @@ New-SecureStoreCertificate -CertificateName 'UserAuth' -Password 'AuthPass123' `
     -EnhancedKeyUsage '1.3.6.1.5.5.7.3.2' `
     -StoreOnly
 ```
+
+> **Note:** By default, certificates are issued with both Server (`1.3.6.1.5.5.7.3.1`) and Client (`1.3.6.1.5.5.7.3.2`) authentication EKUs, ensuring compatibility with Entra ID / Microsoft Graph application registrations.
 
 #### Certificate Parameters
 
@@ -184,7 +185,7 @@ New-SecureStoreCertificate -CertificateName 'UserAuth' -Password 'AuthPass123' `
 | `IpAddress` | String[] | (None) | IP subject alternative names |
 | `Email` | String[] | (None) | Email subject alternative names |
 | `Uri` | String[] | (None) | URI subject alternative names |
-| `EnhancedKeyUsage` | String[] | `1.3.6.1.5.5.7.3.1` | EKU OIDs (Server Authentication by default) |
+| `EnhancedKeyUsage` | String[] | `1.3.6.1.5.5.7.3.1`, `1.3.6.1.5.5.7.3.2` | EKU OIDs (Server + Client Authentication by default) |
 | `ExportPem` | Switch | `$false` | Export PEM file alongside PFX |
 | `StoreOnly` | Switch | `$false` | Keep in cert store without exporting files |
 
