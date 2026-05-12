@@ -1,0 +1,115 @@
+name: SecureStore CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  manifest-validation:
+    name: Manifest validation
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate module manifest
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Test-ModuleManifest -Path .\SecureStore.psd1 -ErrorAction Stop
+          if ($manifest.Name -ne 'SecureStore') {
+            throw "Unexpected module name: $($manifest.Name)"
+          }
+          if (-not ($manifest.CompatiblePSEditions -contains 'Desktop')) {
+            throw 'Manifest must declare Desktop compatibility.'
+          }
+          if (-not ($manifest.CompatiblePSEditions -contains 'Core')) {
+            throw 'Manifest must declare Core compatibility.'
+          }
+
+  script-analyzer:
+    name: PSScriptAnalyzer PSGallery
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -Repository PSGallery
+
+      - name: Run PSGallery analyzer rules
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings PSGallery | Where-Object Severity -ne 'Information')
+          if ($findings.Count -gt 0) {
+            $findings | Format-Table Severity,RuleName,ScriptName,Line,Message -Wrap
+            throw "PSScriptAnalyzer found $($findings.Count) warning/error result(s)."
+          }
+
+  pester-windows-powershell:
+    name: Pester Windows PowerShell 5.1
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester 4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module -Name Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck -Repository PSGallery
+
+      - name: Run Pester tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -ErrorAction SilentlyContinue
+          Import-Module Pester -RequiredVersion 4.10.1 -Force
+          $result = Invoke-Pester -Script .\tests\SecureStore.Tests.ps1 -PassThru -Show None
+          if ($result.FailedCount -ne 0) {
+            throw "$($result.FailedCount) Pester test(s) failed."
+          }
+
+  pester-powershell-7:
+    name: Pester PowerShell 7
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester 4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck -Repository PSGallery
+
+      - name: Run Pester tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -ErrorAction SilentlyContinue
+          Import-Module Pester -RequiredVersion 4.10.1 -Force
+          $result = Invoke-Pester -Script .\tests\SecureStore.Tests.ps1 -PassThru -Show None
+          if ($result.FailedCount -ne 0) {
+            throw "$($result.FailedCount) Pester test(s) failed."
+          }
