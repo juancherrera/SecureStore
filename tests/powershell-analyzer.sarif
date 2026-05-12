@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "properties": {
+        "invocation": {
+          "arguments": [
+            "Invoke-ScriptAnalyzer -Path . -Recurse"
+          ]
+        }
+      },
+      "tool": {
+        "driver": {
+          "name": "PSScriptAnalyzer",
+          "informationUri": "https://github.com/PowerShell/PSScriptAnalyzer",
+          "version": "1.24.0",
+          "rules": []
+        }
+      },
+      "results": []
+    }
+  ]
+}
